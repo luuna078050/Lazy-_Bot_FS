@@ -1,0 +1,40 @@
+name: LazyBot FS Research Matrix
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '20 2 * * 1'
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install research dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Validate research harness
+        run: |
+          python -m py_compile scripts/multitimeframe_research.py scripts/walk_forward_matrix.py
+      - name: Run unit tests
+        run: pytest -q
+      - name: Run 3-month research matrix when backtest data is available
+        env:
+          TRADING_MODE: paper
+          RESEARCH_DAYS: '90'
+          EXECUTION_TIMEFRAMES: '3m,5m,15m'
+          CONTEXT_TIMEFRAMES: '3m,5m,15m,1h,4h'
+          SYMBOLS: 'BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,BNB/USDT:USDT,XRP/USDT:USDT,DOGE/USDT:USDT'
+        run: |
+          if [ -f scripts/backtest_3m.py ]; then python scripts/backtest_3m.py; fi
+          python - <<'PY'
+          from scripts.walk_forward_matrix import cases
+          print(f"Research cases configured: {len(cases())}")
+          for c in cases()[:6]:
+              print(c)
+          PY
