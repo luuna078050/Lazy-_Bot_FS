@@ -1,29 +1,53 @@
 import os
+from datetime import datetime, timezone
 from fastapi import FastAPI
-from dotenv import load_dotenv
-from .core.risk import RiskConfig, RiskEngine
-from .core.scalper import FastScalper
-from .integrations.pchelka import PchelkaClient
+from .forecast import HORIZONS_MIN, validate_horizon, forecast_targets
 
-load_dotenv()
-app = FastAPI(title="LazyBot FS", version="0.1.0")
-risk = RiskEngine(RiskConfig(
-    max_position_usdt=float(os.getenv("MAX_POSITION_USDT", 5)),
-    risk_per_trade_usdt=float(os.getenv("RISK_PER_TRADE_USDT", 1)),
-    daily_loss_limit_usdt=float(os.getenv("DAILY_LOSS_LIMIT_USDT", 3)),
-    leverage=int(os.getenv("LEVERAGE", 5)),
-    take_profit_pct=float(os.getenv("TAKE_PROFIT_PCT", .006)),
-    stop_loss_pct=float(os.getenv("STOP_LOSS_PCT", .003)),
-    trailing_stop_pct=float(os.getenv("TRAILING_STOP_PCT", .002)),
-    breakeven_trigger_pct=float(os.getenv("BREAKEVEN_TRIGGER_PCT", .003)),
-))
-pchelka = PchelkaClient()
-scalper = FastScalper(risk, pchelka)
+app = FastAPI(title="LazyBot FS", version="0.2.0")
+
+
+def paper_config():
+    return {
+        "max_position_usdt": float(os.getenv("MAX_POSITION_USDT", 5)),
+        "risk_per_trade_usdt": float(os.getenv("RISK_PER_TRADE_USDT", 1)),
+        "daily_loss_limit_usdt": float(os.getenv("DAILY_LOSS_LIMIT_USDT", 3)),
+        "leverage": int(os.getenv("LEVERAGE", 5)),
+        "take_profit_pct": float(os.getenv("TAKE_PROFIT_PCT", 0.6)),
+        "stop_loss_pct": float(os.getenv("STOP_LOSS_PCT", 0.3)),
+    }
+
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "project": "LazyBot FS", "mode": os.getenv("TRADING_MODE", "paper"), "pchelka": bool(pchelka.base_url), "trading_halted": risk.state.halted}
+    return {
+        "ok": True,
+        "project": "LazyBot FS",
+        "mode": os.getenv("TRADING_MODE", "paper"),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
 
 @app.get("/api/status")
 def status():
-    return {"project":"LazyBot FS", "fs":"Fast Scalper", "mode":os.getenv("TRADING_MODE","paper"), "symbol":os.getenv("SYMBOL","BTC/USDT:USDT"), "leverage":risk.config.leverage, "max_position_usdt":risk.config.max_position_usdt, "daily_loss_limit_usdt":risk.config.daily_loss_limit_usdt, "pchelka_connected":bool(pchelka.base_url)}
+    return {
+        "project": "LazyBot FS",
+        "strategy": "Fast Scalper",
+        "mode": os.getenv("TRADING_MODE", "paper"),
+        "symbol": os.getenv("SYMBOL", "BTC/USDT:USDT"),
+        "forecast_horizons_min": list(HORIZONS_MIN),
+        "risk": paper_config(),
+        "live_trading": False,
+    }
+
+
+@app.get("/api/paper-test")
+def paper_test(price: float = 100.0, predicted_return_pct: float = 0.1):
+    targets = forecast_targets(price, predicted_return_pct)
+    return {
+        "ok": True,
+        "mode": "paper",
+        "horizons_min": list(HORIZONS_MIN),
+        "targets": {str(h): targets[h] for h in HORIZONS_MIN},
+        "all_horizons_valid": all(validate_horizon(h) == h for h in HORIZONS_MIN),
+        "live_trading": False,
+    }
