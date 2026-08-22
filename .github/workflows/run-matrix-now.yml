@@ -1,0 +1,26 @@
+name: Run 7500 Matrix Now
+
+on:
+  push:
+    paths:
+      - '.github/workflows/run-matrix-now.yml'
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Run matrix endpoint
+        run: |
+          set -euo pipefail
+          echo 'Starting LazyBot FS 7500-case matrix...'
+          curl --fail-with-body --silent --show-error --max-time 2400 \
+            -o matrix-result.json \
+            https://lazybot-fs.onrender.com/api/paper-test/matrix
+          echo 'Matrix endpoint returned:'
+          cat matrix-result.json
+      - name: Upload matrix result
+        uses: actions/upload-artifact@v4
+        with:
+          name: lazybot-fs-7500-matrix-result
+          path: matrix-result.json
