@@ -11,22 +11,62 @@ from .risk_settings import load_settings, set_stop_loss_enabled
 from .strategy_intelligence import evaluate
 from .rocket_hunter import classify_candles, entry_plan
 from .fast_scalper_config import FastScalperConfig, validate as validate_fast, recommended_profit
-app=FastAPI(title='LazyBot FS',version='1.1.0')
+app=FastAPI(title='LazyBot FS',version='1.2.0')
+
 def paper_config():
     risk=load_settings()
     return {'max_position':float(os.getenv('MAX_POSITION_USD',os.getenv('MAX_POSITION_USDT',5))),'risk_per_trade':float(os.getenv('RISK_PER_TRADE_USD',os.getenv('RISK_PER_TRADE_USDT',1))),'daily_loss_limit':float(os.getenv('DAILY_LOSS_LIMIT_USD',os.getenv('DAILY_LOSS_LIMIT_USDT',3))),'leverage':int(os.getenv('LEVERAGE',1)),'take_profit_pct':float(os.getenv('TAKE_PROFIT_PCT',.6)),'stop_loss_pct':float(os.getenv('STOP_LOSS_PCT',.3)),'stop_loss_enabled':risk['stop_loss_enabled'],'stop_loss_label':'Ограничение убытка (SL)','exit_mode':'STOP_LOSS' if risk['stop_loss_enabled'] else 'WAIT_FOR_RECOVERY'}
+
 def profit_time_config():
     return {'mode':os.getenv('PROFIT_TARGET_MODE','money_time'),'target_profit_per_unit':float(os.getenv('PROFIT_TARGET_PER_UNIT','.25')),'minimum_profit_per_unit':float(os.getenv('PROFIT_FLOOR_PER_UNIT','.20')),'target_trade_interval_sec':int(os.getenv('TARGET_TRADE_INTERVAL_SEC','90')),'max_trade_hold_sec':int(os.getenv('MAX_TRADE_HOLD_SEC','180')),'estimated_round_trip_fee_pct':float(os.getenv('ESTIMATED_ROUND_TRIP_FEE_PCT','0'))}
-def fast_scalper_config():
-    capital=float(os.getenv('FAST_SCALPER_CAPITAL_USDT','30')); pairs=tuple(x.strip() for x in os.getenv('FAST_SCALPER_PAIRS','DGB/USDT,ZRO/USDT,TUT/USDT,USUAL/USDT,TURBO/USDT').split(',') if x.strip()); alloc=tuple(float(x) for x in os.getenv('FAST_SCALPER_ALLOCATIONS','20,20,20,20,20').split(',')); minp=float(os.getenv('FAST_SCALPER_MIN_PROFIT_USDT','0.20')); target=float(os.getenv('FAST_SCALPER_TARGET_PROFIT_USDT','0.30')); cfg=FastScalperConfig(capital,pairs,alloc,'3m',180,minp,target,os.getenv('FAST_SCALPER_STOP_LOSS_ENABLED','true').lower()=='true',float(os.getenv('FAST_SCALPER_STOP_LOSS_PCT','0.50'))); validate_fast(cfg); return {'capital_usdt':capital,'pairs':pairs,'allocations_pct':alloc,'allocation_usdt':[round(capital*x/100,8) for x in alloc],'timeframe':'3m','max_trade_seconds':180,'min_profit_usdt':minp,'target_profit_usdt':target,'stop_loss_enabled':cfg.stop_loss_enabled,'stop_loss_pct':cfg.stop_loss_pct,'recommended_profit':recommended_profit(capital/len(pairs),float(os.getenv('FAST_SCALPER_ROUND_TRIP_FEE_PCT','0')))}
+
+def free_quote_balance(exchange_id='binance',quote='USDT'):
+    try:
+        bal=gateway(exchange_id).fetch_balance()
+        free=bal.get('free',{}) or {}
+        value=free.get(quote)
+        if value is None:
+            row=bal.get(quote,{}) or {}; value=row.get('free',0)
+        return float(value or 0)
+    except Exception:
+        return None
+
+def fast_scalper_config(capital=None):
+    pairs=tuple(x.strip() for x in os.getenv('FAST_SCALPER_PAIRS','DGB/USDT,ZRO/USDT,TUT/USDT,USUAL/USDT,TURBO/USDT').split(',') if x.strip())
+    alloc=tuple(float(x) for x in os.getenv('FAST_SCALPER_ALLOCATIONS','20,20,20,20,20').split(','))
+    minp=float(os.getenv('FAST_SCALPER_MIN_PROFIT_USDT','0.20')); target=float(os.getenv('FAST_SCALPER_TARGET_PROFIT_USDT','0.30'))
+    if capital is None: capital=float(os.getenv('FAST_SCALPER_CAPITAL_USDT','0'))
+    cfg=FastScalperConfig(capital,pairs,alloc,'3m',180,minp,target,os.getenv('FAST_SCALPER_STOP_LOSS_ENABLED','true').lower()=='true',float(os.getenv('FAST_SCALPER_STOP_LOSS_PCT','0.50')))
+    validate_fast(cfg)
+    return {'capital_usdt':capital,'pairs':pairs,'allocations_pct':alloc,'allocation_usdt':[round(capital*x/100,8) for x in alloc],'timeframe':'3m','max_trade_seconds':180,'min_profit_usdt':minp,'target_profit_usdt':target,'stop_loss_enabled':cfg.stop_loss_enabled,'stop_loss_pct':cfg.stop_loss_pct,'recommended_profit':recommended_profit(capital/len(pairs),float(os.getenv('FAST_SCALPER_ROUND_TRIP_FEE_PCT','0'))) if capital>0 else {'minimum_profit_usdt':minp,'target_profit_usdt':target,'estimated_fee_usdt':0}}
+
+def budget_state(exchange_id='binance',requested=0):
+    free=free_quote_balance(exchange_id,'USDT')
+    req=float(requested or 0)
+    return {'exchange':exchange_id,'quote':'USDT','requested_budget_usdt':req,'free_balance_usdt':free,'budget_allowed':free is not None and req>=0 and req<=free,'warning':None if free is None else (None if req<=free else f'Бюджет {req:.8f} USDT превышает свободный баланс {free:.8f} USDT.')}
+
 @app.get('/api/health')
 def health():return {'ok':True,'project':'LazyBot FS','mode':os.getenv('TRADING_MODE','live'),'timestamp':datetime.now(timezone.utc).isoformat()}
 @app.get('/api/status')
-def status():return {'project':'LazyBot FS','strategy':'Fast Scalper + Rocket Hunter','mode':os.getenv('TRADING_MODE','live'),'exchanges':configured_exchange_ids(),'symbol':os.getenv('SYMBOL','BTC/USDT'),'forecast_horizons_min':list(HORIZONS_MIN),'execution_horizon':'1-3m','timeframes':['4h','2h','1h','30m','15m','5m','3m','1m'],'indicators':['MA7','MA25','MA99','RSI14','Stochastic14','slope5','trend_smoothness'],'risk':paper_config(),'profit_time':profit_time_config(),'fast_scalper':fast_scalper_config(),'rocket_hunter_states':['IGNITION','RELOAD','ORBIT','WAIT'],'orderbook_module':'dynamic_walls_v2','live_trading':os.getenv('LIVE_TRADING','false').lower()=='true' and os.getenv('LIVE_TRADING_ARMED','false').lower()=='true','live_transfers':os.getenv('LIVE_TRANSFER_ARMED','false').lower()=='true'}
+def status():return {'project':'LazyBot FS','strategy':'Fast Scalper + Rocket Hunter','mode':os.getenv('TRADING_MODE','live'),'exchanges':configured_exchange_ids(),'symbol':os.getenv('SYMBOL','BTC/USDT'),'forecast_horizons_min':list(HORIZONS_MIN),'execution_horizon':'1-3m','timeframes':['4h','2h','1h','30m','3m','1m'],'indicators':['MA7','MA25','MA99','RSI14','Stochastic14','slope5','trend_smoothness'],'risk':paper_config(),'profit_time':profit_time_config(),'fast_scalper':fast_scalper_config(),'rocket_hunter_states':['IGNITION','RELOAD','ORBIT','WAIT'],'orderbook_module':'dynamic_walls_v2','live_trading':os.getenv('LIVE_TRADING','false').lower()=='true' and os.getenv('LIVE_TRADING_ARMED','false').lower()=='true','live_transfers':os.getenv('LIVE_TRANSFER_ARMED','false').lower()=='true'}
+
+@app.get('/api/budget')
+def budget(requested:float=0,exchange_id:str='binance'):return budget_state(exchange_id,requested)
+
 @app.get('/fast-scalper',response_class=HTMLResponse)
 def fast_scalper_page():
-    p=fast_scalper_config(); checks='checked' if p['stop_loss_enabled'] else ''; rows=''.join(f'<div class="row"><input value="{s}" class="pair"><input value="{p["allocations_pct"][i]}" class="alloc" type="number" min="1" max="100"><span>USDT <b class="usd">{p["capital_usdt"]*p["allocations_pct"][i]/100:.2f}</b></span></div>' for i,s in enumerate(p['pairs']))
-    return f'''<!doctype html><html lang="ru"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LazyBot FS — Fast Scalper</title><style>body{{font-family:system-ui;background:#18202b;color:#eee;max-width:650px;margin:auto;padding:22px}}.card{{background:#232e3c;border-radius:16px;padding:18px;margin:12px 0}}input{{background:#303b4b;color:#fff;border:1px solid #465466;border-radius:10px;padding:10px;width:90px}}.pair{{width:150px}}button{{padding:13px 18px;border:0;border-radius:10px;font-weight:700}}.green{{color:#39d98a}}.muted{{color:#aab4c2}}.row{{display:flex;gap:10px;align-items:center;margin:10px 0}}.wide{{width:100%}}</style><h1>⚡ Fast Scalper</h1><div class="card"><b>Капитал бота</b><br><input id="capital" type="number" value="{p['capital_usdt']}" min="1"> USDT</div><div class="card"><h3>Торговые пары</h3>{rows}<p class="muted">Распределение должно быть ровно 100%. Бот может работать максимум с 5 активными парами.</p></div><div class="card"><h3>Фрейм</h3><b class="green">3 минуты</b><p class="muted">Одна сделка получает максимум 180 секунд. Realtime Rocket Hunter работает каждую секунду.</p></div><div class="card"><h3>Профит</h3><p>Минимальный: <input id="minp" type="number" step="0.01" value="{p['min_profit_usdt']}"> USDT</p><p>Целевой: <input id="target" type="number" step="0.01" value="{p['target_profit_usdt']}"> USDT</p><button onclick="recommend()">Предложить профит</button><p id="rec" class="green">Рекомендация для этой конфигурации: {p['recommended_profit']['minimum_profit_usdt']}–{p['recommended_profit']['target_profit_usdt']} USDT</p></div><div class="card"><label><input id="sl" type="checkbox" {checks}> Ограничение убытка (SL)</label><p class="muted">Если выключить — Fast Scalper не закрывает убыточную позицию только по SL.</p></div><div class="card"><button class="wide" onclick="saveCfg()">Сохранить конфигурацию</button><p id="msg"></p></div><script>function vals(){{return [...document.querySelectorAll('.alloc')].map(x=>+x.value)}}function recommend(){{const c=+capital.value;const fee=0;const min=Math.max(.20,fee*3),tar=Math.max(.30,fee*4);rec.textContent='Рекомендация: '+min.toFixed(2)+'–'+tar.toFixed(2)+' USDT NET на сделку';minp.value=min.toFixed(2);target.value=tar.toFixed(2)}}function saveCfg(){{const a=vals();if(Math.abs(a.reduce((x,y)=>x+y,0)-100)>.01){{msg.textContent='Ошибка: распределение должно быть 100%';return}}msg.textContent='Сохранено локально для запуска Fast Scalper 3m.';localStorage.setItem('fast_scalper_cfg',JSON.stringify({{capital:+capital.value,pairs:[...document.querySelectorAll('.pair')].map(x=>x.value),alloc:a,min:+minp.value,target:+target.value,sl:sl.checked}}))}}</script></html>'''
+    p=fast_scalper_config(); checks='checked' if p['stop_loss_enabled'] else ''
+    rows=''.join(f'<div class="row"><input value="{s}" class="pair"><input value="{p["allocations_pct"][i]}" class="alloc" type="number" min="1" max="100"><span>USDT <b class="usd">{p["capital_usdt"]*p["allocations_pct"][i]/100:.2f}</b></span></div>' for i,s in enumerate(p['pairs']))
+    return f'''<!doctype html><html lang="ru"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LazyBot FS — Fast Scalper</title><style>body{{font-family:system-ui;background:#18202b;color:#eee;max-width:650px;margin:auto;padding:22px}}.card{{background:#232e3c;border-radius:16px;padding:18px;margin:12px 0}}input{{background:#303b4b;color:#fff;border:1px solid #465466;border-radius:10px;padding:10px;width:90px}}.pair{{width:150px}}button{{padding:13px 18px;border:0;border-radius:10px;font-weight:700}}.green{{color:#39d98a}}.red{{color:#ff6b6b}}.muted{{color:#aab4c2}}.row{{display:flex;gap:10px;align-items:center;margin:10px 0}}.wide{{width:100%}}</style><h1>⚡ Fast Scalper</h1><div class="card"><b>Бюджет бота</b><br><input id="capital" type="number" value="{p['capital_usdt']}" min="0" step="0.01"> USDT <p id="free" class="green">Проверяю свободный баланс Binance…</p><p class="muted">Бюджет можно установить любым значением от 0 до свободного USDT-баланса. Нельзя выделить больше свободного баланса.</p></div><div class="card"><h3>Торговые пары</h3>{rows}<p class="muted">Распределение должно быть ровно 100%. До 5 активных пар.</p></div><div class="card"><h3>Фрейм</h3><b class="green">3 минуты</b><p class="muted">Одна сделка получает максимум 180 секунд. Realtime Rocket Hunter работает каждую секунду.</p></div><div class="card"><h3>Профит</h3><p>Минимальный: <input id="minp" type="number" step="0.01" value="{p['min_profit_usdt']}"> USDT</p><p>Целевой: <input id="target" type="number" step="0.01" value="{p['target_profit_usdt']}"> USDT</p><button onclick="recommend()">Предложить профит</button><p id="rec" class="green">Рекомендация появится после выбора бюджета.</p></div><div class="card"><label><input id="sl" type="checkbox" {checks}> Ограничение убытка (SL)</label><p class="muted">Если выключить — позиция не закрывается только по SL.</p></div><div class="card"><button class="wide" onclick="saveCfg()">Сохранить конфигурацию</button><p id="msg"></p></div><script>
+let freeBalance=null;
+async function loadBudget(){{try{{const r=await fetch('/api/budget');const d=await r.json();freeBalance=d.free_balance_usdt;if(freeBalance===null){{free.textContent='Не удалось получить свободный баланс — API Binance ещё не настроен.';free.className='red';}}else{{free.textContent='Свободно на Binance: '+freeBalance.toFixed(8)+' USDT';capital.max=freeBalance;}}}}catch(e){{free.textContent='Ошибка проверки баланса';free.className='red';}}}}
+capital.addEventListener('input',()=>{{if(freeBalance!==null&&+capital.value>freeBalance){{capital.value=freeBalance;msg.textContent='Бюджет ограничен свободным балансом Binance.';}}document.querySelectorAll('.usd').forEach((x,i)=>x.textContent=(+capital.value*+document.querySelectorAll('.alloc')[i].value/100).toFixed(2));}});
+function vals(){{return [...document.querySelectorAll('.alloc')].map(x=>+x.value)}}
+function recommend(){{const c=+capital.value;const min=Math.max(.20,c*.002),tar=Math.max(.30,c*.003);rec.textContent='Рекомендация: '+min.toFixed(2)+'–'+tar.toFixed(2)+' USDT NET на сделку';minp.value=min.toFixed(2);target.value=tar.toFixed(2)}}
+async function saveCfg(){{const a=vals();const c=+capital.value;if(Math.abs(a.reduce((x,y)=>x+y,0)-100)>.01){{msg.textContent='Ошибка: распределение должно быть 100%';return}}const r=await fetch('/api/budget?requested='+encodeURIComponent(c));const d=await r.json();if(!d.budget_allowed){{msg.textContent=d.warning||'Бюджет превышает свободный баланс';return}}msg.textContent='Конфигурация сохранена. Бюджет: '+c.toFixed(2)+' USDT.';localStorage.setItem('fast_scalper_cfg',JSON.stringify({{capital:c,pairs:[...document.querySelectorAll('.pair')].map(x=>x.value),alloc:a,min:+minp.value,target:+target.value,sl:sl.checked}}))}}
+loadBudget();
+</script></html>'''
+
 @app.get('/settings/risk',response_class=HTMLResponse)
 def risk_settings_page():
     enabled=load_settings()['stop_loss_enabled'];checked='checked' if enabled else '';mode='STOP_LOSS' if enabled else 'WAIT_FOR_RECOVERY';p=profit_time_config()
@@ -71,10 +111,16 @@ def exchange_preflight(symbol:str):
 @app.get('/api/exchanges/entry-requirements')
 def exchange_entry_requirements(exchange_id:str,symbol:str,capital_usdt:float=30.0,allocation_pct:float=20.0):
     try:
-        req=gateway(exchange_id).market_entry_requirements(symbol)
+        g=gateway(exchange_id);markets=g.load_markets();m=markets.get(symbol)
+        if not m: raise ValueError('symbol_not_available')
+        limits=m.get('limits',{}) or {}; amount_lim=limits.get('amount',{}) or {}; cost_lim=limits.get('cost',{}) or {}; price=0.0
+        try: price=float(g.exchange.fetch_ticker(symbol).get('last') or 0)
+        except Exception: price=0.0
+        minimum_cost=cost_lim.get('min'); minimum_amount=amount_lim.get('min')
+        if minimum_cost is None and minimum_amount is not None and price>0: minimum_cost=float(minimum_amount)*price
         budget=capital_usdt*allocation_pct/100.0
-        minimum=req.get('minimum_cost')
-        req.update({'capital_usdt':capital_usdt,'allocation_pct':allocation_pct,'allocated_usdt':round(budget,8),'entry_possible_with_allocation':minimum is None or budget>=minimum,'allocation_warning':None if minimum is None or budget>=minimum else f"Выделено {budget:.8g} USDT, но минимальный вход {minimum:.8g} {req.get('quote')}. Нужно увеличить слот или выбрать другую пару."})
+        req={'exchange':exchange_id,'symbol':symbol,'base':m.get('base'),'quote':m.get('quote'),'price':price,'minimum_amount':minimum_amount,'minimum_cost':minimum_cost,'capital_usdt':capital_usdt,'allocation_pct':allocation_pct,'allocated_usdt':round(budget,8),'entry_possible_with_allocation':minimum_cost is None or budget>=minimum_cost}
+        req['allocation_warning']=None if req['entry_possible_with_allocation'] else f"Выделено {budget:.8g} USDT, но минимальный вход {float(minimum_cost):.8g} {m.get('quote')}. Нужно увеличить слот или выбрать другую пару."
         return req
     except Exception as exc:raise HTTPException(status_code=400,detail=str(exc))
 @app.get('/api/exchanges/route')
@@ -87,6 +133,10 @@ def exchange_balance(exchange_id:str):
 def exchange_order(exchange_id:str,symbol:str,side:str,amount:float,price:float|None=None,order_type:str='limit',live:bool=False):
     try:
         if live and (os.getenv('LIVE_TRADING','false').lower()!='true' or os.getenv('LIVE_TRADING_ARMED','false').lower()!='true'):raise HTTPException(status_code=403,detail='Live trading is locked')
+        if live:
+            bal=gateway(exchange_id).fetch_balance();free=(bal.get('free',{}) or {});market=gateway(exchange_id).load_markets().get(symbol,{})
+            quote=market.get('quote','USDT');free_quote=float(free.get(quote,0) or 0);estimated_cost=(amount*price if price is not None else amount)
+            if estimated_cost>free_quote:raise HTTPException(status_code=400,detail=f'Order exceeds free {quote} balance: requested≈{estimated_cost}, free={free_quote}')
         return gateway(exchange_id).create_limit_order(symbol,side,amount,price,live=live) if order_type=='limit' else gateway(exchange_id).create_market_order(symbol,side,amount,live=live)
     except HTTPException:raise
     except Exception as exc:raise HTTPException(status_code=400,detail=str(exc))
