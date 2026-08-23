@@ -2,122 +2,120 @@
 
 **FS = Fast Scalper.** Unified working baseline for fast-scalper features, with Pchelka integration.
 
+## Fast Scalper 3m — ready Binance profile
+
+The current test/live profile is `scripts/fast_scalper_3m.py`.
+
+It is designed for the user's manual workflow:
+
+- **2 or 3 USDT spot pairs** selected by the user;
+- allocation entered as percentages and required to total **100%**;
+- example: **DGB 30% / ZRO 30% / TUT 40%** on 100 USDT;
+- fixed strategy timeframe: **3m**;
+- maximum trade budget: **180 seconds**;
+- realtime Rocket Hunter pulse: **1 second**;
+- profit is an **absolute USDT amount**, not a percentage;
+- default minimum acceptable profit: **0.20 USDT net**;
+- default target: **0.30 USDT net**;
+- at 90 seconds the minimum can close the trade to recycle capital;
+- at 180 seconds a non-losing position is exited by the 3m time rule;
+- optional SL remains a separate checkbox.
+
+The browser UI is available at `/fast-scalper`. It shows capital, 2–3 pairs, percentage allocation, the resulting USDT amount per pair, fixed 3m timeframe, profit controls, the bot's suggested profit range, and the SL switch.
+
+The bot's profit metric is now **USDT per minute**, not maximum profit from one position. This directly targets the observed manual problem where a good DGB trade produced about 0.77 USDT but took 6:43 because a human missed several seconds and the position stayed open too long.
+
+### Run
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.fast_scalper.example .env
+python -m scripts.fast_scalper_3m
+```
+
+The default is **PAPER** while using live Binance public trade data. To enable real Binance Spot execution, configure the Binance API key/secret and explicitly set:
+
+```text
+FAST_SCALPER_LIVE=true
+LIVE_TRADING=true
+LIVE_TRADING_ARMED=true
+```
+
+The live runner still requires the existing execution guards in `ExchangeGateway`. It uses the Binance Spot market-order interface only; no futures and no leverage.
+
+For live trading, use a dedicated/sub-account with only the permissions required for Spot trading, **no withdrawals**, and IP restrictions where possible. Binance's current guidance recommends least-privilege permissions and disabling withdrawals for trading bots. urlBinance API security guidancehttps://academy.binance.com/en/articles/what-is-an-api-key-and-how-to-use-it-securely
+
+Binance's Spot WebSocket market streams are used for the one-second micro layer, while REST/CCXT remains available for account and execution operations. Binance documents the Spot WebSocket API and notes that WebSocket API connections are time-limited, so the client reconnects when needed. citeturn0news25turn0news26
+
 ## Included
 - Binance / CCXT spot exchange adapter
 - multi-pair radar and capital-slot allocation
 - separate exchange account balance vs user-assigned **bot account balance**
-- bot balance can be configured by fixed amount or percentage of account balance
 - paper/live execution separation
-- position sizing and leverage limits
-- money/time profit targeting plus optional percentage TP mode
+- money/time profit targeting
+- absolute USDT profit targeting for Fast Scalper 3m
 - TP/SL with a **user-controlled SL switch** and daily loss guard
-- Telegram notifications adapter
-- Pchelka research adapter
-- signal/risk/execution separation
-- dynamic order-book pressure: imbalance, relative walls, wall persistence and spoof-risk detection
-- regime-aware MTF intelligence: 4h/2h/1h/30m/15m/5m/3m/1m + optional micro-flow
+- dynamic order-book pressure
+- regime-aware MTF intelligence: 4h/2h/1h/30m/15m/5m/3m/1m + micro-flow
 - MA7/25/99, RSI14, Stochastic14, trend smoothness and impulse/pullback/retest/breakout structure
 - **Rocket Hunter** for early acceleration / ignition detection rather than late pump chasing
-
-## Money + time profit mode
-
-The main scalper profile no longer has to think in percentages. It can work from two plain-language targets:
-
-1. **Profit per one unit of allocated capital** — e.g. `0.25` means the bot aims for 0.25 units of net profit for each 1 unit allocated to the trade.
-2. **Target interval between completed trades** — e.g. `90` seconds means the bot tries to recycle completed trades around every 1.5 minutes.
-
-There is also a lower profit floor. With the default profile:
-
-- target: **0.25 per 1 unit**;
-- floor: **0.20 per 1 unit**;
-- target interval: **90 seconds**;
-- maximum hold budget for a still-valid non-losing position: **180 seconds**.
-
-If the full money target is reached early, the bot closes. At 90 seconds it may accept the lower floor to increase turnover. At 180 seconds it may recycle a non-losing still-valid position. An underwater position is not forced closed by this time policy; the separate SL switch controls loss-based protection.
-
-The interval is a **throughput target, not a promise**. The bot must not create weak entries just to hit the clock. It increases the chance of higher turnover through multi-pair scanning/ranking and multiple controlled positions.
-
-`ESTIMATED_ROUND_TRIP_FEE_PCT` can be supplied so the money target is evaluated against estimated net profit rather than gross price movement.
-
-The legacy percentage TP remains available when `PROFIT_TARGET_MODE=percent`. The default is `money_time`.
-
-## Exit policy / SL checkbox
-
-The scalper keeps the profit target independent from **Stop Loss**.
-
-**☑ Ограничение убытка (SL)**
-- the configured stop-loss level is enforced;
-- a position can be closed at the SL level;
-- the money/time profit target remains active.
-
-**☐ Ограничение убытка (SL)**
-- no fixed loss-based stop is applied;
-- an underwater position is allowed to wait for recovery / a valid strategy exit;
-- a bearish reversal by itself does not close an underwater position;
-- profitable confirmed reversal exits remain allowed.
-
-The setting is exposed through `/api/settings/risk` and `/api/settings/risk/stop-loss`, persisted in `scalper_settings.json`, and has a visible browser control at `/settings/risk`. The default remains **enabled** so the existing protective behavior is preserved until the user deliberately switches it off.
+- one-second Binance public trade pulse for short 2–3 second bursts
 
 ## Rocket Hunter
 
 Rocket Hunter searches for the **launch**, not a rocket that is already on orbit. It prioritizes early acceleration, relative volume expansion, price acceleration, buyer imbalance, liquidity quality and higher-timeframe confirmation, while penalizing exhaustion and late-entry conditions.
 
-A candidate can be classified as `EARLY_ROCKET`, `IGNITION`, `WATCH`, or `IGNORE`. The module is part of LazyBot FS; it is not a separate bot.
+A candidate can be classified as `EARLY_ROCKET`, `IGNITION`, `RELOAD`, `ORBIT`, or `WAIT`. A 2–3 second burst can therefore trigger a realtime candidate without waiting for a 3-minute candle to close.
 
 ## Capital policy
-The **bot account balance** is the capital the user assigns to this bot. It is not the whole exchange account balance. The user may allocate it by fixed amount or percentage of the account balance.
+The **bot account balance** is the capital assigned to this bot, not the whole exchange account. Fast Scalper 3m lets the user explicitly distribute 100% of that bot balance across 2–3 configured pairs.
 
-The user may manually assign up to **100% of the bot account balance** to one position if they explicitly choose to do so.
+Example:
 
-The separate **automatic allocation policy** is more conservative: while automatic allocation is enabled, the bot itself may use **at most 40% of bot account balance for one position**. This 40% limit does NOT restrict a user's manual allocation choice.
+- 100 USDT total;
+- DGB 30% = 30 USDT;
+- ZRO 30% = 30 USDT;
+- TUT 40% = 40 USDT.
 
-Automatic dynamic allocation is initially frozen during the validation period. After validation, it may size positions from signal quality, subject to the 40% automatic cap.
+The bot never automatically changes these allocation percentages. It can choose whether to enter a configured pair, but the capital ceiling for that pair is the user-defined allocation.
 
-## Commercial policy
-Commercial mode is locked until the validated strategy effectiveness reaches at least **75%**. Profit share is **0.1% (0.001)** of positive realized **net** profit only. No profit share is charged on losing trades.
+## Profit policy
 
-## Live 20 USDT test
-The ready runner is `scripts/live_scalper_20.py`.
+Fast Scalper 3m does **not** use the earlier `0.25 per 1 unit of capital` model. That scaling was too aggressive for small accounts.
 
-It is **paper by default**. The real-test profile is `.env.real20.example` and is intentionally not armed. No leverage and no withdrawals.
+The current model is:
 
-Install:
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.real20.example .env
-```
+**small fixed USDT profit + short holding time + high capital turnover.**
 
-Put the Binance API key/secret into `.env`. The API key should have **spot trading only** and withdrawals disabled.
+Default:
 
-First run in paper mode:
-```bash
-python -m scripts.live_scalper_20
-```
+- minimum: **0.20 USDT net**;
+- target: **0.30 USDT net**;
+- 90 seconds: minimum-profit exit is allowed;
+- 180 seconds: time exit for a non-losing position.
 
-Only after the paper run is verified, explicitly arm the real test in `.env`:
-```text
-TRADING_MODE=live
-LIVE_TRADING=true
-LIVE_TRADING_ARMED=true
-```
-Then run the same command. Stop with Ctrl+C.
+The UI can propose a target based on allocated capital and estimated round-trip fees. The user can override it. No profit target guarantees a fill or a profit in live trading.
 
-State is kept in `scalper_state.json` so a normal restart does not intentionally forget locally tracked positions.
+## Exit policy / SL checkbox
 
-## Order-book intelligence
-The order-book module is evidence-based: a large wall is not automatically treated as support/resistance. It tracks repeated snapshots, detects walls that disappear before price reaches them, and reduces confidence when spoof-risk rises.
+**☑ Ограничение убытка (SL)**
+- configured stop is enforced;
+- money target remains active.
 
-## Architecture
-`Pchelka -> research/evidence -> market + orderbook microstructure -> Rocket Hunter / LazyBot FS -> signal -> risk -> money/time target -> execution`
+**☐ Ограничение убытка (SL)**
+- no fixed loss-based stop is applied;
+- an underwater position can wait for recovery/strategy confirmation.
 
-Pchelka is research-only and never places trades. LazyBot FS remains the specialized fast-scalper brain.
+## Security
 
-## Important
-Live trading is disabled by default. The bot is spot-only in the 20 USDT runner. A temporary negative PnL does not by itself trigger a sell when SL is disabled; the exit policy then waits for recovery/strategy confirmation. With SL enabled, the configured stop is active.
+Live trading is disabled by default. Never commit API secrets. Use a Binance key restricted to the minimum required Spot permissions, disable withdrawals, and use IP restrictions where possible. Binance explicitly recommends least-privilege permissions and no withdrawal access for trading bots. citeturn0search6turn0search8
 
 ## API service
+
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
+
+Then open `/fast-scalper` for the Fast Scalper configuration screen.
