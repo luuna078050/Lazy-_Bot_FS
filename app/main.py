@@ -1,1 +1,1 @@
-from .fixed_app import app
+from .ui_app import app
