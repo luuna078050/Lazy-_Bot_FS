@@ -320,3 +320,15 @@ RADAR = MarketRadar(20)
 # Start the market stream as the web service starts; the dashboard never
 # depends on a user click to initialize market data.
 RADAR.start()
+
+def _boot_radar_check() -> None:
+    def _check() -> None:
+        try:
+            rows = RADAR.snapshot(20)
+            top = rows[0]["symbol"] if rows else "NONE"
+            print(f"RADAR_RANKING_READY count={len(rows)} top={top}", flush=True)
+        except Exception as exc:
+            print(f"RADAR_RANKING_ERROR {str(exc)[:300]}", flush=True)
+    threading.Thread(target=_check, daemon=True, name="radar-boot-check").start()
+
+_boot_radar_check()
