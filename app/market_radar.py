@@ -156,10 +156,11 @@ class MarketRadar:
         if not s:
             return
         with self.lock:
-            first = not self._ready.is_set()
             self.tickers[s] = dict(d)
             self.last_update = time.time()
-            self._ready.set()
+            first = (not self._ready.is_set() and s.endswith("USDT") and s[:-4] not in STABLE_BASES)
+            if first:
+                self._ready.set()
         if first:
             print(f"RADAR_DATA_READY {s} price={d.get('c', '')}", flush=True)
 
