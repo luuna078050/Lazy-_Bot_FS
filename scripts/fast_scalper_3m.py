@@ -1,4 +1,4 @@
-"""LazyBot FS — Fast Scalper 3m/short-pump runner with capital-rotation logic."""
+"""LazyBot FS — Fast Scalper 3m/short-pump runner with fixed bot capital and profit accumulation."""
 from __future__ import annotations
 import json, os, signal, time
 from pathlib import Path
@@ -32,9 +32,6 @@ MAX_HOLD=180
 PUMP_HOLD=20
 FEE_PCT=float(os.getenv('FAST_SCALPER_ROUND_TRIP_FEE_PCT','0.20'))/100
 
-# Capital is a scarce, rotating resource. These guards prevent a weak position
-# from immobilizing a small account while a materially stronger selected pair
-# is entering a pump/rocket state.
 ROTATION_MIN_HOLD_SEC=float(os.getenv('FAST_SCALPER_ROTATION_MIN_HOLD_SEC','20'))
 ROTATION_SCORE_GAP=float(os.getenv('FAST_SCALPER_ROTATION_SCORE_GAP','0.18'))
 ROTATION_MIN_ALT_SCORE=float(os.getenv('FAST_SCALPER_ROTATION_MIN_ALT_SCORE','0.58'))
@@ -67,9 +64,10 @@ def load_state():
             s.setdefault('cooldowns',{})
             s.setdefault('rotation_count',0)
             s.setdefault('rotation_pnl',0.0)
+            s.setdefault('accumulated_profit_usdt',0.0)
             return s
         except Exception: pass
-    return {'mode':'MIXED' if LIVE_PAIRS and PAPER_PAIRS else ('LIVE' if LIVE_PAIRS else 'PAPER'),'capital':CAPITAL,'free_capital':CAPITAL,'realized_pnl':0.0,'positions':{},'orders':{},'trades':[],'cooldowns':{},'rotation_count':0,'rotation_pnl':0.0,'started_at':time.time(),'error':None}
+    return {'mode':'MIXED' if LIVE_PAIRS and PAPER_PAIRS else ('LIVE' if LIVE_PAIRS else 'PAPER'),'capital':CAPITAL,'free_capital':CAPITAL,'realized_pnl':0.0,'accumulated_profit_usdt':0.0,'positions':{},'orders':{},'trades':[],'cooldowns':{},'rotation_count':0,'rotation_pnl':0.0,'started_at':time.time(),'error':None}
 
 def save(s):
     STATE.parent.mkdir(parents=True,exist_ok=True)
@@ -96,7 +94,12 @@ def close(s,symbol,price,reason,now):
         s['orders'][symbol]={'symbol':symbol,'side':'SELL','requested_amount':sell_amount,'filled_amount':amount,'remaining_amount':max(0,sell_amount-amount),'status':order.get('status','CLOSED'),'order_id':order.get('id')}
     profit=pnl({**pos,'amount':amount},price)
     s['realized_pnl']+=profit
-    s['free_capital']+=float(pos['capital'])+profit
+    # IMPORTANT: bot capital is fixed. Only the original allocated capital
+    # returns to the trading pool. Profit is accumulated separately and is
+    # never available for the next entry unless the user explicitly changes
+    # the bot capital later.
+    s['free_capital']+=float(pos['capital'])
+    s['accumulated_profit_usdt']=float(s.get('accumulated_profit_usdt',0.0))+profit
     is_rotation=reason.startswith('CAPITAL_ROTATION')
     if is_rotation:
         s['rotation_count']=int(s.get('rotation_count',0))+1
@@ -128,8 +131,7 @@ signal.signal(signal.SIGTERM,_sigterm)
 
 def strength(raw):
     if not raw:return 0.0
-    state=raw.get('state')
-    base=float(raw.get('score',0))
+    state=raw.get('state'); base=float(raw.get('score',0))
     if state=='IGNITION': return min(1.0,base+0.12)
     if state=='EARLY_ROCKET': return base
     return max(0.0,base-0.10)
@@ -154,15 +156,14 @@ if LIVE_PAIRS:
         if live_cap>free+1e-9: raise RuntimeError(f'LIVE capital {live_cap} exceeds free USDT balance {free}')
     except Exception as exc:s['error']=str(exc)[:300];save(s);raise
 rec=recommended_profit(CAPITAL/len(SYMBOLS),FEE_PCT*100)
-print(json.dumps({'mode':'MIXED' if LIVE_PAIRS and PAPER_PAIRS else ('LIVE' if LIVE_PAIRS else 'PAPER'),'exchange':'binance','capital':CAPITAL,'pairs':SYMBOLS,'live_pairs':sorted(LIVE_PAIRS),'paper_pairs':sorted(PAPER_PAIRS),'allocations_pct':ALLOCS,'timeframe':'3m','pump_hold_sec':PUMP_HOLD,'trade_budget_sec':MAX_HOLD,'minimum_profit_usdt':MIN_PROFIT,'target_profit_usdt':TARGET_PROFIT,'recommended':rec,'stop_loss':SL_ENABLED,'pulse':'1s','live_orders':bool(LIVE_PAIRS),'capital_rotation':{'enabled':True,'min_hold_sec':ROTATION_MIN_HOLD_SEC,'score_gap':ROTATION_SCORE_GAP,'min_alt_score':ROTATION_MIN_ALT_SCORE,'stale_check_sec':STALE_CHECK_SEC}},ensure_ascii=False),flush=True)
+print(json.dumps({'mode':'MIXED' if LIVE_PAIRS and PAPER_PAIRS else ('LIVE' if LIVE_PAIRS else 'PAPER'),'exchange':'binance','capital':CAPITAL,'pairs':SYMBOLS,'live_pairs':sorted(LIVE_PAIRS),'paper_pairs':sorted(PAPER_PAIRS),'allocations_pct':ALLOCS,'timeframe':'3m','pump_hold_sec':PUMP_HOLD,'trade_budget_sec':MAX_HOLD,'minimum_profit_usdt':MIN_PROFIT,'target_profit_usdt':TARGET_PROFIT,'recommended':rec,'stop_loss':SL_ENABLED,'pulse':'1s','live_orders':bool(LIVE_PAIRS),'capital_rotation':{'enabled':True,'min_hold_sec':ROTATION_MIN_HOLD_SEC,'score_gap':ROTATION_SCORE_GAP,'min_alt_score':ROTATION_MIN_ALT_SCORE,'stale_check_sec':STALE_CHECK_SEC},'profit_policy':'FIXED_BOT_CAPITAL_ACCUMULATE_PROFIT'},ensure_ascii=False),flush=True)
 
 try:
     while not STOP_REQUESTED:
         cmd=command()
         if cmd=='EMERGENCY_STOP': emergency(s); break
         if cmd=='STOP': break
-        now=time.time(); snaps=pulse.snapshot()
-        held=set(s['positions']); alternative=best_alternative(snaps,held)
+        now=time.time(); snaps=pulse.snapshot(); held=set(s['positions']); alternative=best_alternative(snaps,held)
         for symbol,pos in list(s['positions'].items()):
             raw=snaps.get(symbol.replace('/','')) or snaps.get(symbol)
             if not raw:continue
@@ -174,14 +175,11 @@ try:
             else:
                 held_strength=strength(raw)
                 if alternative and age>=ROTATION_MIN_HOLD_SEC:
-                    alt_strength,alt_symbol,_=alternative
-                    gap=alt_strength-held_strength
-                    stale=(age>=STALE_CHECK_SEC and held_strength<STALE_MIN_SCORE)
-                    if gap>=ROTATION_SCORE_GAP and (profit<MIN_PROFIT or stale): reason=f'CAPITAL_ROTATION->{alt_symbol}'
-                    elif stale and alt_strength>=ROTATION_MIN_ALT_SCORE and profit<MIN_PROFIT: reason=f'CAPITAL_ROTATION_STALE->{alt_symbol}'
+                    alt_strength,alt_symbol,_=alternative; gap=alt_strength-held_strength; stale=(age>=STALE_CHECK_SEC and held_strength<STALE_MIN_SCORE)
+                    if gap>=ROTATION_SCORE_GAP and (profit<MIN_PROFIT or stale):reason=f'CAPITAL_ROTATION->{alt_symbol}'
+                    elif stale and alt_strength>=ROTATION_MIN_ALT_SCORE and profit<MIN_PROFIT:reason=f'CAPITAL_ROTATION_STALE->{alt_symbol}'
             if reason:
-                try:
-                    close(s,symbol,price,reason,now); held=set(s['positions']); alternative=best_alternative(snaps,held)
+                try:close(s,symbol,price,reason,now); held=set(s['positions']); alternative=best_alternative(snaps,held)
                 except Exception as exc:s['error']=str(exc)[:300]
         for idx,symbol in enumerate(SYMBOLS):
             raw=snaps.get(symbol.replace('/','')) or snaps.get(symbol)
@@ -194,7 +192,7 @@ try:
             price=float(raw['price']); amount=budget/price; live=is_live_symbol(symbol)
             try:
                 if live:
-                    EX.load_markets(); amount=float(EX.exchange.amount_to_precision(symbol,amount));
+                    EX.load_markets(); amount=float(EX.exchange.amount_to_precision(symbol,amount))
                     if amount<=0:continue
                     order=EX.create_market_order(symbol,'buy',amount,live=True); actual_price=float(order.get('average') or order.get('price') or price); actual_amount=float(order.get('filled') or amount)
                     fills=order.get('trades',[]) or []
@@ -206,6 +204,8 @@ try:
                 s['positions'][symbol]={'entry':actual_price,'capital':budget,'amount':actual_amount,'opened':now,'score':score,'state':raw['state'],'signal':signal_type,'hold_sec':PUMP_HOLD if signal_type=='PUMP' else MAX_HOLD,'allocation_pct':ALLOCS[idx],'fills':fills,'mode':'LIVE' if live else 'PAPER'}
                 print(json.dumps({'event':'ENTRY','mode':'LIVE' if live else 'PAPER','symbol':symbol,'capital':budget,'price':actual_price,'amount':actual_amount,'score':score,'signal':signal_type},ensure_ascii=False),flush=True)
             except Exception as exc:s['error']=str(exc)[:300]
-        s['updated_at']=now; s['capital_efficiency']={'free_capital':s.get('free_capital',0),'rotation_count':s.get('rotation_count',0),'rotation_pnl':s.get('rotation_pnl',0.0)}; save(s); time.sleep(1)
+        s['updated_at']=now
+        s['capital_efficiency']={'free_capital':s.get('free_capital',0),'rotation_count':s.get('rotation_count',0),'rotation_pnl':s.get('rotation_pnl',0.0),'accumulated_profit_usdt':s.get('accumulated_profit_usdt',0.0),'profit_policy':'FIXED_BOT_CAPITAL_ACCUMULATE_PROFIT'}
+        save(s); time.sleep(1)
 finally:
     pulse.stop();save(s)
