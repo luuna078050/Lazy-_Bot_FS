@@ -35,7 +35,14 @@ function addManual(){const top=document.getElementById('top');if(!top||document.
 window.addEventListener('DOMContentLoaded',function(){applyPaperMode();enhanceTop();addManual();const top=document.getElementById('top');if(top){new MutationObserver(()=>{enhanceTop();markTopSelections();addManual()}).observe(top,{childList:true,subtree:true})}});setTimeout(function(){applyPaperMode();enhanceTop();addManual()},100);
 })();</script>'''
                 html = html.replace('</body>', js + '</body>', 1)
-                return HTMLResponse(content=html, status_code=getattr(response, 'status_code', 200), headers=dict(getattr(response, 'headers', {}) or {}), media_type='text/html')
+                # The body was modified after the original HTMLResponse calculated
+                # Content-Length. Do not copy that stale header into the new response.
+                headers = dict(getattr(response, 'headers', {}) or {})
+                headers.pop('content-length', None)
+                headers.pop('Content-Length', None)
+                headers.pop('content-type', None)
+                headers.pop('Content-Type', None)
+                return HTMLResponse(content=html, status_code=getattr(response, 'status_code', 200), headers=headers, media_type='text/html')
 
             endpoint._paper_mode_wrapped = True
             route.endpoint = endpoint
