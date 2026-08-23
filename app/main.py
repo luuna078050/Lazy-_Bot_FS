@@ -6,13 +6,27 @@ from .cross_validation import run_matrix
 from .exchange_gateway import configured_exchange_ids, gateway, choose_best_spot
 from .transfer_router import plan_cross_exchange
 from .orderbook_pressure import analyze_orderbook
+from .risk_settings import load_settings, set_stop_loss_enabled
 from .strategy_intelligence import evaluate
-app=FastAPI(title='LazyBot FS',version='0.6.0')
-def paper_config():return {'max_position':float(os.getenv('MAX_POSITION_USD',os.getenv('MAX_POSITION_USDT',5))),'risk_per_trade':float(os.getenv('RISK_PER_TRADE_USD',os.getenv('RISK_PER_TRADE_USDT',1))),'daily_loss_limit':float(os.getenv('DAILY_LOSS_LIMIT_USD',os.getenv('DAILY_LOSS_LIMIT_USDT',3))),'leverage':int(os.getenv('LEVERAGE',1)),'take_profit_pct':float(os.getenv('TAKE_PROFIT_PCT',.6)),'stop_loss_pct':float(os.getenv('STOP_LOSS_PCT',.3))}
+app=FastAPI(title='LazyBot FS',version='0.7.0')
+def paper_config():
+    risk=load_settings()
+    return {'max_position':float(os.getenv('MAX_POSITION_USD',os.getenv('MAX_POSITION_USDT',5))),'risk_per_trade':float(os.getenv('RISK_PER_TRADE_USD',os.getenv('RISK_PER_TRADE_USDT',1))),'daily_loss_limit':float(os.getenv('DAILY_LOSS_LIMIT_USD',os.getenv('DAILY_LOSS_LIMIT_USDT',3))),'leverage':int(os.getenv('LEVERAGE',1)),'take_profit_pct':float(os.getenv('TAKE_PROFIT_PCT',.6)),'stop_loss_pct':float(os.getenv('STOP_LOSS_PCT',.3)),'stop_loss_enabled':risk['stop_loss_enabled'],'stop_loss_label':'Ограничение убытка (SL)','exit_mode':'STOP_LOSS' if risk['stop_loss_enabled'] else 'WAIT_FOR_RECOVERY'}
 @app.get('/api/health')
 def health():return {'ok':True,'project':'LazyBot FS','mode':os.getenv('TRADING_MODE','paper'),'timestamp':datetime.now(timezone.utc).isoformat()}
 @app.get('/api/status')
 def status():return {'project':'LazyBot FS','strategy':'Fast Scalper','mode':os.getenv('TRADING_MODE','paper'),'exchanges':configured_exchange_ids(),'symbol':os.getenv('SYMBOL','BTC/USDT'),'forecast_horizons_min':list(HORIZONS_MIN),'execution_horizon':'1-3m','timeframes':['4h','2h','1h','30m','15m','5m','3m','1m'],'indicators':['MA7','MA25','MA99','RSI14','Stochastic14','slope5','trend_smoothness'],'risk':paper_config(),'orderbook_module':'dynamic_walls_v2','quote_currency':'agnostic','live_trading':os.getenv('LIVE_TRADING','false').lower()=='true' and os.getenv('LIVE_TRADING_ARMED','false').lower()=='true','live_transfers':os.getenv('LIVE_TRANSFER_ARMED','false').lower()=='true'}
+@app.get('/api/settings/risk')
+def risk_settings():
+    risk=load_settings()
+    return {'stop_loss_enabled':risk['stop_loss_enabled'],'label':'Ограничение убытка (SL)','exit_mode':'STOP_LOSS' if risk['stop_loss_enabled'] else 'WAIT_FOR_RECOVERY'}
+@app.post('/api/settings/risk/stop-loss')
+def set_risk_stop_loss(payload:dict):
+    if 'enabled' not in payload: raise HTTPException(status_code=400,detail='Field "enabled" is required')
+    enabled=payload['enabled']
+    if not isinstance(enabled,bool): raise HTTPException(status_code=400,detail='Field "enabled" must be boolean')
+    risk=set_stop_loss_enabled(enabled)
+    return {'ok':True,'stop_loss_enabled':risk['stop_loss_enabled'],'label':'Ограничение убытка (SL)','exit_mode':'STOP_LOSS' if risk['stop_loss_enabled'] else 'WAIT_FOR_RECOVERY'}
 @app.post('/api/strategy/evaluate')
 def strategy_evaluate(payload:dict):return evaluate(payload.get('timeframes',{}),payload.get('orderbook'))
 @app.get('/api/paper-test')
