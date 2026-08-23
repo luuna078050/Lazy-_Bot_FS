@@ -9,24 +9,23 @@ from .transfer_router import plan_cross_exchange
 from .orderbook_pressure import analyze_orderbook
 from .risk_settings import load_settings, set_stop_loss_enabled
 from .strategy_intelligence import evaluate
-app=FastAPI(title='LazyBot FS',version='0.7.1')
+app=FastAPI(title='LazyBot FS',version='0.8.0')
 def paper_config():
     risk=load_settings()
     return {'max_position':float(os.getenv('MAX_POSITION_USD',os.getenv('MAX_POSITION_USDT',5))),'risk_per_trade':float(os.getenv('RISK_PER_TRADE_USD',os.getenv('RISK_PER_TRADE_USDT',1))),'daily_loss_limit':float(os.getenv('DAILY_LOSS_LIMIT_USD',os.getenv('DAILY_LOSS_LIMIT_USDT',3))),'leverage':int(os.getenv('LEVERAGE',1)),'take_profit_pct':float(os.getenv('TAKE_PROFIT_PCT',.6)),'stop_loss_pct':float(os.getenv('STOP_LOSS_PCT',.3)),'stop_loss_enabled':risk['stop_loss_enabled'],'stop_loss_label':'Ограничение убытка (SL)','exit_mode':'STOP_LOSS' if risk['stop_loss_enabled'] else 'WAIT_FOR_RECOVERY'}
+def profit_time_config():
+    return {'mode':os.getenv('PROFIT_TARGET_MODE','money_time'),'target_profit_per_unit':float(os.getenv('PROFIT_TARGET_PER_UNIT','.25')),'minimum_profit_per_unit':float(os.getenv('PROFIT_FLOOR_PER_UNIT','.20')),'target_trade_interval_sec':int(os.getenv('TARGET_TRADE_INTERVAL_SEC','90')),'max_trade_hold_sec':int(os.getenv('MAX_TRADE_HOLD_SEC','180')),'estimated_round_trip_fee_pct':float(os.getenv('ESTIMATED_ROUND_TRIP_FEE_PCT','0'))}
 @app.get('/api/health')
 def health():return {'ok':True,'project':'LazyBot FS','mode':os.getenv('TRADING_MODE','paper'),'timestamp':datetime.now(timezone.utc).isoformat()}
 @app.get('/api/status')
-def status():return {'project':'LazyBot FS','strategy':'Fast Scalper','mode':os.getenv('TRADING_MODE','paper'),'exchanges':configured_exchange_ids(),'symbol':os.getenv('SYMBOL','BTC/USDT'),'forecast_horizons_min':list(HORIZONS_MIN),'execution_horizon':'1-3m','timeframes':['4h','2h','1h','30m','15m','5m','3m','1m'],'indicators':['MA7','MA25','MA99','RSI14','Stochastic14','slope5','trend_smoothness'],'risk':paper_config(),'orderbook_module':'dynamic_walls_v2','quote_currency':'agnostic','live_trading':os.getenv('LIVE_TRADING','false').lower()=='true' and os.getenv('LIVE_TRADING_ARMED','false').lower()=='true','live_transfers':os.getenv('LIVE_TRANSFER_ARMED','false').lower()=='true'}
+def status():return {'project':'LazyBot FS','strategy':'Fast Scalper','mode':os.getenv('TRADING_MODE','paper'),'exchanges':configured_exchange_ids(),'symbol':os.getenv('SYMBOL','BTC/USDT'),'forecast_horizons_min':list(HORIZONS_MIN),'execution_horizon':'1-3m','timeframes':['4h','2h','1h','30m','15m','5m','3m','1m'],'indicators':['MA7','MA25','MA99','RSI14','Stochastic14','slope5','trend_smoothness'],'risk':paper_config(),'profit_time':profit_time_config(),'orderbook_module':'dynamic_walls_v2','quote_currency':'agnostic','live_trading':os.getenv('LIVE_TRADING','false').lower()=='true' and os.getenv('LIVE_TRADING_ARMED','false').lower()=='true','live_transfers':os.getenv('LIVE_TRANSFER_ARMED','false').lower()=='true'}
 @app.get('/settings/risk',response_class=HTMLResponse)
 def risk_settings_page():
-    enabled=load_settings()['stop_loss_enabled']
-    checked='checked' if enabled else ''
-    mode='STOP_LOSS' if enabled else 'WAIT_FOR_RECOVERY'
-    return f'''<!doctype html><html lang="ru"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LazyBot FS — риск</title><body style="font-family:system-ui;max-width:560px;margin:40px auto;padding:0 20px"><h2>Lazy Scalper</h2><label style="display:flex;gap:12px;align-items:center;font-size:18px"><input id="sl" type="checkbox" {checked} style="width:22px;height:22px"><span>Ограничение убытка (SL)</span></label><p id="mode">Режим: {mode}</p><p>Выключено = ждать восстановления вместо выхода по убытку.</p><script>const c=document.getElementById('sl'),m=document.getElementById('mode');c.onchange=async()=>{{const r=await fetch('/api/settings/risk/stop-loss',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{enabled:c.checked}})}});const d=await r.json();m.textContent='Режим: '+d.exit_mode;}};</script></body></html>'''
+    enabled=load_settings()['stop_loss_enabled'];checked='checked' if enabled else '';mode='STOP_LOSS' if enabled else 'WAIT_FOR_RECOVERY';p=profit_time_config()
+    return f'''<!doctype html><html lang="ru"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LazyBot FS — скальпер</title><body style="font-family:system-ui;max-width:560px;margin:40px auto;padding:0 20px"><h2>Lazy Scalper</h2><label style="display:flex;gap:12px;align-items:center;font-size:18px"><input id="sl" type="checkbox" {checked} style="width:22px;height:22px"><span>Ограничение убытка (SL)</span></label><p id="mode">Режим: {mode}</p><hr><h3>Профит + скорость</h3><p>Профит на 1 единицу капитала: <b>{p['target_profit_per_unit']}</b></p><p>Минимум после целевого времени: <b>{p['minimum_profit_per_unit']}</b></p><p>Целевой интервал сделки: <b>{p['target_trade_interval_sec']} сек</b></p><p>Максимальный бюджет удержания: <b>{p['max_trade_hold_sec']} сек</b></p><p>Интервал — цель оборота, а не команда входить в плохую сделку.</p><script>const c=document.getElementById('sl'),m=document.getElementById('mode');c.onchange=async()=>{{const r=await fetch('/api/settings/risk/stop-loss',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{enabled:c.checked}})}});const d=await r.json();m.textContent='Режим: '+d.exit_mode;}};</script></body></html>'''
 @app.get('/api/settings/risk')
 def risk_settings():
-    risk=load_settings()
-    return {'stop_loss_enabled':risk['stop_loss_enabled'],'label':'Ограничение убытка (SL)','exit_mode':'STOP_LOSS' if risk['stop_loss_enabled'] else 'WAIT_FOR_RECOVERY'}
+    risk=load_settings();return {'stop_loss_enabled':risk['stop_loss_enabled'],'label':'Ограничение убытка (SL)','exit_mode':'STOP_LOSS' if risk['stop_loss_enabled'] else 'WAIT_FOR_RECOVERY'}
 @app.post('/api/settings/risk/stop-loss')
 def set_risk_stop_loss(payload:dict):
     if 'enabled' not in payload: raise HTTPException(status_code=400,detail='Field "enabled" is required')
@@ -34,6 +33,8 @@ def set_risk_stop_loss(payload:dict):
     if not isinstance(enabled,bool): raise HTTPException(status_code=400,detail='Field "enabled" must be boolean')
     risk=set_stop_loss_enabled(enabled)
     return {'ok':True,'stop_loss_enabled':risk['stop_loss_enabled'],'label':'Ограничение убытка (SL)','exit_mode':'STOP_LOSS' if risk['stop_loss_enabled'] else 'WAIT_FOR_RECOVERY'}
+@app.get('/api/settings/profit-time')
+def profit_time_settings():return profit_time_config()
 @app.post('/api/strategy/evaluate')
 def strategy_evaluate(payload:dict):return evaluate(payload.get('timeframes',{}),payload.get('orderbook'))
 @app.get('/api/paper-test')
