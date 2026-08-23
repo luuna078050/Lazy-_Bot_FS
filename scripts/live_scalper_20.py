@@ -54,8 +54,7 @@ def run_once(ex,state):
     now={s:{"score":round(sc,4),"direction":a["direction"],"regime":a["regime"]["regime"],"ob":a["orderbook_score"],"structure":a["timeframes"].get("3m",{}).get("structure",{}).get("score",0)} for sc,s,a in radar}
     for symbol,pos in list(state["positions"].items()):
         try:
-            last=float(ex.exchange.fetch_ticker(symbol)["last"]);entry=float(pos["entry"]);pnl=(last/entry-1)*100;sc,a=rank_map.get(symbol,(0.0,{}));confirmed_reversal=sc<-.35 and a.get("direction")=="bearish"
-            reason="tp_sl" if last>=entry*(1+TP) or last<=entry*(1-SL) else "confirmed_reversal" if confirmed_reversal and pnl>=0 else None
+            last=float(ex.exchange.fetch_ticker(symbol)["last"]);entry=float(pos["entry"]);pnl=(last/entry-1)*100;sc,a=rank_map.get(symbol,(0.0,{}));confirmed_reversal=sc<-.35 and a.get("direction")=="bearish";reason="tp_sl" if last>=entry*(1+TP) or last<=entry*(1-SL) else "confirmed_reversal" if confirmed_reversal and pnl>=0 else None
             if reason:
                 amount=float(pos["amount"]);res=ex.create_market_order(symbol,"sell",amount,live=_live());state["realized_pnl"]+=amount*entry*(pnl/100);state["trades"].append({"ts":time.time(),"symbol":symbol,"exit":last,"pnl_pct":pnl,"reason":reason,"order":res});del state["positions"][symbol]
             else:pos.update({"last":last,"pnl_pct":pnl,"score":sc})
@@ -67,7 +66,7 @@ def run_once(ex,state):
         if regime=="bear" or ob<0 or (regime=="flat" and float(structure.get("score",0))<.40):continue
         allocation=_allocation(score,free_slots)
         if allocation is None:continue
-        budget=CAPITAL*allocation/100;price=float(ex.exchange.fetch_ticker(symbol)["last"]);amount=ex.amount_to_precision(symbol,budget/price)
+        budget=CAPITAL*allocation/100;price=float(ex.exchange.fetch_ticker(symbol)["last"]);amount=float(ex.exchange.amount_to_precision(symbol,budget/price))
         if amount<=0:continue
         try:
             res=ex.create_market_order(symbol,"buy",amount,live=_live());state["positions"][symbol]={"entry":price,"amount":amount,"allocation_pct":allocation,"score":score,"opened":time.time()};used.add(symbol);free_slots.remove(allocation);free-=1
