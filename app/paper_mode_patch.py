@@ -28,7 +28,7 @@ const labels=document.querySelectorAll('.metric small');labels.forEach(el=>{cons
 const pnl=document.querySelector('.pnl .title');if(pnl){const base=pnl.dataset.pmBase||(pnl.dataset.pmBase=pnl.textContent);pnl.textContent=on?'PnL • VIRTUAL':base}
 const result=document.getElementById('result');if(result&&!result.dataset.pmPatched){result.dataset.pmPatched='1';const obs=new MutationObserver(()=>{if(!pmOn())return;result.querySelectorAll('b').forEach(b=>{if(!b.previousSibling||!String(b.previousSibling.textContent||'').includes('VIRTUAL')){}})});obs.observe(result,{childList:true,subtree:true})}}
 window.togglePaperMode=function(){const next=!pmOn();localStorage.setItem(PM_KEY,next?'1':'0');applyPaperMode();};
-window.addEventListener('DOMContentLoaded',applyPaperMode);setTimeout(applyPaperMode,50);})();</script>'''
+window.addEventListener('DOMContentLoaded',function(){applyPaperMode();const realStart=window.start;if(typeof realStart==='function'&&!window.__paperStartWrapped){window.__paperStartWrapped=true;window.start=function(mode){if(pmOn()&&mode==='LIVE'){return realStart('PAPER')}return realStart(mode)}}});setTimeout(applyPaperMode,50);})();</script>'''
                 html = html.replace('</body>', js + '</body>', 1)
                 return HTMLResponse(content=html, status_code=getattr(response, 'status_code', 200), headers=dict(getattr(response, 'headers', {}) or {}), media_type='text/html')
 
