@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi.responses import HTMLResponse
 from fastapi.routing import request_response
+import inspect
 
 
 def install(app):
@@ -13,7 +14,7 @@ def install(app):
                 return
 
             def endpoint(*args, **kwargs):
-                response = original(*args, **kwargs)
+                response = original() if not inspect.signature(original).parameters else original(*args, **kwargs)
                 html = response.body.decode('utf-8') if isinstance(response, HTMLResponse) and isinstance(response.body, (bytes, bytearray)) else str(response)
                 marker = '<div class="tag">ЛОВИМ РАКЕТЫ НА ВЗЛЁТЕ</div>'
                 inject = r'''<div class="paper-mode" id="paperModeBox"><span class="pm-label">PAPER MODE</span><button id="paperModeToggle" class="pm-toggle" type="button" aria-pressed="false" onclick="togglePaperMode()"><span class="pm-dot"></span><span id="paperModeText">OFF</span></button><span class="pm-note" id="paperModeNote">без реальных активов</span></div>'''
