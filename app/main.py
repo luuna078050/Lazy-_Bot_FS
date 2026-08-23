@@ -17,8 +17,10 @@ try:
     from .paper_mode_patch import install as _install_paper_mode
     from .allocation_fix_patch import install as _install_allocation_fix
     from .report_v6_patch import install as _install_report_v6
+    from .run_switch_patch import install as _install_run_switch_v6
     _install_paper_mode(app)
     _install_allocation_fix(app)
     _install_report_v6()
+    _install_run_switch_v6(app)
 finally:
     threading.Thread.start = _original_thread_start
