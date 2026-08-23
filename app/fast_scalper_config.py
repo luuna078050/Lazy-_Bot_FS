@@ -1,12 +1,12 @@
-"""Configuration and validation for the 3-minute Fast Scalper UI."""
+"""Configuration and validation for the Fast Scalper profile."""
 from __future__ import annotations
 from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class FastScalperConfig:
-    capital_usdt: float = 100.0
-    symbols: tuple[str, ...] = ("DGB/USDT", "ZRO/USDT", "TUT/USDT")
-    allocations_pct: tuple[float, ...] = (30.0, 30.0, 40.0)
+    capital_usdt: float = 30.0
+    symbols: tuple[str, ...] = ("DGB/USDT", "ZRO/USDT", "TUT/USDT", "USUAL/USDT", "TURBO/USDT")
+    allocations_pct: tuple[float, ...] = (20.0, 20.0, 20.0, 20.0, 20.0)
     timeframe: str = "3m"
     max_trade_seconds: int = 180
     min_profit_usdt: float = 0.20
@@ -17,7 +17,7 @@ class FastScalperConfig:
 def validate(cfg: FastScalperConfig) -> None:
     if cfg.capital_usdt <= 0: raise ValueError("capital_usdt must be positive")
     if len(cfg.symbols) != len(cfg.allocations_pct): raise ValueError("symbols and allocations must have equal length")
-    if not 2 <= len(cfg.symbols) <= 3: raise ValueError("Fast Scalper supports 2 or 3 pairs")
+    if not 2 <= len(cfg.symbols) <= 5: raise ValueError("Fast Scalper supports 2 to 5 active pairs")
     if abs(sum(cfg.allocations_pct) - 100.0) > 1e-9: raise ValueError("allocations must total 100%")
     if any(x <= 0 for x in cfg.allocations_pct): raise ValueError("each allocation must be positive")
     if cfg.timeframe != "3m": raise ValueError("Fast Scalper test profile is fixed to 3m")
