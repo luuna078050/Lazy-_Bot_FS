@@ -3,7 +3,8 @@
 **FS = Fast Scalper.** Unified working baseline for the previously developed fast-scalper features, with Pchelka integration.
 
 ## Included
-- Binance Futures / CCXT adapter
+- Binance / CCXT exchange adapter layer
+- multi-exchange spot routing with account/region eligibility checks
 - async market data interface
 - paper/live execution separation
 - position sizing and leverage limits
@@ -13,9 +14,13 @@
 - Pchelka research adapter
 - signal/risk/execution separation
 - configurable symbols and risk limits
+- **dynamic order-book pressure module:** bid/ask imbalance, relative walls, wall persistence and spoof-risk detection
+
+## Order-book intelligence
+The order-book module is evidence-based: a large wall is not automatically treated as support/resistance. The analyzer tracks repeated snapshots, detects walls that disappear before price reaches them, and reduces confidence when spoof-risk rises. It is exposed through `/api/orderbook/analyze` and is intended to become a confirmation input for the signal/risk layer.
 
 ## Architecture
-`Pchelka -> research/evidence -> LazyBot FS -> signal -> risk -> execution`
+`Pchelka -> research/evidence -> market + orderbook microstructure -> LazyBot FS -> signal -> risk -> execution`
 
 Pchelka is research-only and never places trades. LazyBot FS remains the specialized fast-scalper brain.
 
