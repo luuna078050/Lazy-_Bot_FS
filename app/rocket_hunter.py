@@ -27,7 +27,7 @@ def scan(s: RocketSnapshot)->RocketSignal:
     score=max(0.0,min(1.0,.38*early+.20*trend+.18*micro+.14*higher+(.05 if 0<s.price<.001 else 0)-exhaustion*.20))
     phase="EARLY_ROCKET" if score>=.72 and acceleration>=.55 and momentum>=.50 else "IGNITION" if score>=.55 and momentum>=.38 else "WATCH" if score>=.40 else "IGNORE"
     reasons=[]
-    if acceleration>=.15:reasons.append("volume_acceleration")
+    if acceleration>=.14:reasons.append("volume_acceleration")
     if price_accel>=.45:reasons.append("price_acceleration")
     if s.buy_imbalance>.20:reasons.append("buyer_imbalance")
     if s.spread_bps<=12:reasons.append("tight_spread")
