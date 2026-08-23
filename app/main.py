@@ -6,7 +6,7 @@ from .cross_validation import run_matrix
 from .exchange_gateway import configured_exchange_ids, gateway, choose_best_spot
 from .transfer_router import plan_cross_exchange
 
-app = FastAPI(title="LazyBot FS", version="0.4.0")
+app = FastAPI(title="LazyBot FS", version="0.4.1")
 
 
 def paper_config():
@@ -25,17 +25,7 @@ def health():
 
 @app.get("/api/status")
 def status():
-    return {
-        "project": "LazyBot FS",
-        "strategy": "Fast Scalper",
-        "mode": os.getenv("TRADING_MODE", "paper"),
-        "exchanges": configured_exchange_ids(),
-        "symbol": os.getenv("SYMBOL", "BTC/USDT"),
-        "forecast_horizons_min": list(HORIZONS_MIN),
-        "risk": paper_config(),
-        "live_trading": os.getenv("LIVE_TRADING", "false").lower() == "true" and os.getenv("LIVE_TRADING_ARMED", "false").lower() == "true",
-        "live_transfers": os.getenv("LIVE_TRANSFER_ARMED", "false").lower() == "true",
-    }
+    return {"project": "LazyBot FS", "strategy": "Fast Scalper", "mode": os.getenv("TRADING_MODE", "paper"), "exchanges": configured_exchange_ids(), "symbol": os.getenv("SYMBOL", "BTC/USDT"), "forecast_horizons_min": list(HORIZONS_MIN), "risk": paper_config(), "live_trading": os.getenv("LIVE_TRADING", "false").lower() == "true" and os.getenv("LIVE_TRADING_ARMED", "false").lower() == "true", "live_transfers": os.getenv("LIVE_TRANSFER_ARMED", "false").lower() == "true"}
 
 @app.get("/api/paper-test")
 def paper_test(price: float = 100.0, predicted_return_pct: float = 0.1):
@@ -50,29 +40,37 @@ def paper_test_matrix():
 def exchange_capabilities():
     result = {}
     for eid in configured_exchange_ids():
-        try:
-            result[eid] = gateway(eid).public_capabilities()
-        except Exception as exc:
-            result[eid] = {"exchange": eid, "available": False, "error": str(exc)[:300]}
+        try: result[eid] = gateway(eid).public_capabilities()
+        except Exception as exc: result[eid] = {"exchange": eid, "available": False, "error": str(exc)[:300]}
     return result
 
 @app.get("/api/exchanges/preflight")
 def exchange_preflight(symbol: str):
     result = {}
     for eid in configured_exchange_ids():
-        try:
-            result[eid] = gateway(eid).account_preflight(symbol)
-        except Exception as exc:
-            result[eid] = {"exchange": eid, "eligible": False, "errors": [str(exc)[:300]]}
+        try: result[eid] = gateway(eid).account_preflight(symbol)
+        except Exception as exc: result[eid] = {"exchange": eid, "eligible": False, "errors": [str(exc)[:300]]}
     return result
 
 @app.get("/api/exchanges/route")
 def exchange_route(symbol: str):
     return {"symbol": symbol, "venues": choose_best_spot(configured_exchange_ids(), symbol)}
 
+@app.get("/api/exchanges/balance")
+def exchange_balance(exchange_id: str):
+    try: return gateway(exchange_id).fetch_balance()
+    except Exception as exc: raise HTTPException(status_code=400, detail=str(exc))
+
+@app.post("/api/exchanges/order")
+def exchange_order(exchange_id: str, symbol: str, side: str, amount: float, price: float | None = None, order_type: str = "limit", live: bool = False):
+    try:
+        if live and (os.getenv("LIVE_TRADING", "false").lower() != "true" or os.getenv("LIVE_TRADING_ARMED", "false").lower() != "true"):
+            raise HTTPException(status_code=403, detail="Live trading is locked")
+        return gateway(exchange_id).create_limit_order(symbol, side, amount, price, live=live) if order_type == "limit" else gateway(exchange_id).create_market_order(symbol, side, amount, live=live)
+    except HTTPException: raise
+    except Exception as exc: raise HTTPException(status_code=400, detail=str(exc))
+
 @app.get("/api/transfers/plan")
 def transfer_plan(symbol_buy: str, symbol_sell: str, asset: str, source_exchange: str, destination_exchange: str, amount: float):
-    try:
-        return plan_cross_exchange(symbol_buy, symbol_sell, asset, source_exchange, destination_exchange, amount)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    try: return plan_cross_exchange(symbol_buy, symbol_sell, asset, source_exchange, destination_exchange, amount)
+    except Exception as exc: raise HTTPException(status_code=400, detail=str(exc))
