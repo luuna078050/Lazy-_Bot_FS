@@ -13,7 +13,7 @@ def _defer_radar_start(self, *args, **kwargs):
 
 threading.Thread.start = _defer_radar_start
 try:
-    from .ui_v5 import app
+    from .ui_v6 import app
     from .paper_mode_patch import install as _install_paper_mode
     from .allocation_fix_patch import install as _install_allocation_fix
     _install_paper_mode(app)
