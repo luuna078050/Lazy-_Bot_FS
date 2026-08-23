@@ -315,4 +315,5 @@ class MarketRadar:
 
 RADAR = MarketRadar(20)
 # Start the market stream as the web service starts; the dashboard never
-aRADAR.start()
+# depends on a user click to initialize market data.
+RADAR.start()
