@@ -9,7 +9,8 @@ from .transfer_router import plan_cross_exchange
 from .orderbook_pressure import analyze_orderbook
 from .risk_settings import load_settings, set_stop_loss_enabled
 from .strategy_intelligence import evaluate
-app=FastAPI(title='LazyBot FS',version='0.8.0')
+from .rocket_hunter import classify_candles, entry_plan
+app=FastAPI(title='LazyBot FS',version='0.9.0')
 def paper_config():
     risk=load_settings()
     return {'max_position':float(os.getenv('MAX_POSITION_USD',os.getenv('MAX_POSITION_USDT',5))),'risk_per_trade':float(os.getenv('RISK_PER_TRADE_USD',os.getenv('RISK_PER_TRADE_USDT',1))),'daily_loss_limit':float(os.getenv('DAILY_LOSS_LIMIT_USD',os.getenv('DAILY_LOSS_LIMIT_USDT',3))),'leverage':int(os.getenv('LEVERAGE',1)),'take_profit_pct':float(os.getenv('TAKE_PROFIT_PCT',.6)),'stop_loss_pct':float(os.getenv('STOP_LOSS_PCT',.3)),'stop_loss_enabled':risk['stop_loss_enabled'],'stop_loss_label':'Ограничение убытка (SL)','exit_mode':'STOP_LOSS' if risk['stop_loss_enabled'] else 'WAIT_FOR_RECOVERY'}
@@ -18,7 +19,7 @@ def profit_time_config():
 @app.get('/api/health')
 def health():return {'ok':True,'project':'LazyBot FS','mode':os.getenv('TRADING_MODE','paper'),'timestamp':datetime.now(timezone.utc).isoformat()}
 @app.get('/api/status')
-def status():return {'project':'LazyBot FS','strategy':'Fast Scalper','mode':os.getenv('TRADING_MODE','paper'),'exchanges':configured_exchange_ids(),'symbol':os.getenv('SYMBOL','BTC/USDT'),'forecast_horizons_min':list(HORIZONS_MIN),'execution_horizon':'1-3m','timeframes':['4h','2h','1h','30m','15m','5m','3m','1m'],'indicators':['MA7','MA25','MA99','RSI14','Stochastic14','slope5','trend_smoothness'],'risk':paper_config(),'profit_time':profit_time_config(),'orderbook_module':'dynamic_walls_v2','quote_currency':'agnostic','live_trading':os.getenv('LIVE_TRADING','false').lower()=='true' and os.getenv('LIVE_TRADING_ARMED','false').lower()=='true','live_transfers':os.getenv('LIVE_TRANSFER_ARMED','false').lower()=='true'}
+def status():return {'project':'LazyBot FS','strategy':'Fast Scalper + Rocket Hunter','mode':os.getenv('TRADING_MODE','paper'),'exchanges':configured_exchange_ids(),'symbol':os.getenv('SYMBOL','BTC/USDT'),'forecast_horizons_min':list(HORIZONS_MIN),'execution_horizon':'1-3m','timeframes':['4h','2h','1h','30m','15m','5m','3m','1m'],'indicators':['MA7','MA25','MA99','RSI14','Stochastic14','slope5','trend_smoothness'],'risk':paper_config(),'profit_time':profit_time_config(),'rocket_hunter_states':['IGNITION','RELOAD','ORBIT','WAIT'],'orderbook_module':'dynamic_walls_v2','quote_currency':'agnostic','live_trading':os.getenv('LIVE_TRADING','false').lower()=='true' and os.getenv('LIVE_TRADING_ARMED','false').lower()=='true','live_transfers':os.getenv('LIVE_TRANSFER_ARMED','false').lower()=='true'}
 @app.get('/settings/risk',response_class=HTMLResponse)
 def risk_settings_page():
     enabled=load_settings()['stop_loss_enabled'];checked='checked' if enabled else '';mode='STOP_LOSS' if enabled else 'WAIT_FOR_RECOVERY';p=profit_time_config()
@@ -37,6 +38,9 @@ def set_risk_stop_loss(payload:dict):
 def profit_time_settings():return profit_time_config()
 @app.post('/api/strategy/evaluate')
 def strategy_evaluate(payload:dict):return evaluate(payload.get('timeframes',{}),payload.get('orderbook'))
+@app.post('/api/rocket-hunter/evaluate')
+def rocket_hunter_evaluate(payload:dict):
+    candles=payload.get('candles',[]);state=classify_candles(candles);return {'state':state,'entry_plan':entry_plan(candles,state),'execution_horizon':'1-3m','rule':'do_not_force_entry_if_not_ignition'}
 @app.get('/api/paper-test')
 def paper_test(price:float=100.0,predicted_return_pct:float=.1):
     targets=forecast_targets(price,predicted_return_pct);return {'ok':True,'mode':'paper','horizons_min':list(HORIZONS_MIN),'targets':{str(h):targets[h] for h in HORIZONS_MIN},'all_horizons_valid':all(validate_horizon(h)==h for h in HORIZONS_MIN),'live_trading':False}
