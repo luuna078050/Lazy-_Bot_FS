@@ -5,4 +5,5 @@ pydantic>=2.8,<3
 python-dotenv>=1.0,<2
 ccxt>=4.4,<5
 python-telegram-bot>=21,<23
+websocket-client>=1.8,<2
 pytest>=8,<9
