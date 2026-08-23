@@ -9,7 +9,8 @@ def test_normal_market():
     assert r['pump_events']==0
 
 def test_pump_now():
-    prices=[1.0]*16+[1.01,1.02,1.03,1.036]; vols=[100]*19+[500]
+    prices=[1.0]*10+[1.01,1.02,1.03,1.04,1.05,1.06,1.075,1.09,1.11,1.125]
+    vols=[100]*10+[250,250,250,100,100,100,100,100,100,600]
     r=analyze_3m_ohlcv(rows(prices,vols))
     assert r['signal']=='PUMP_NOW'
     assert r['hold_seconds']==20
