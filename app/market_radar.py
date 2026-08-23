@@ -156,9 +156,12 @@ class MarketRadar:
         if not s:
             return
         with self.lock:
+            first = not self._ready.is_set()
             self.tickers[s] = dict(d)
             self.last_update = time.time()
             self._ready.set()
+        if first:
+            print(f"RADAR_DATA_READY {s} price={d.get('c', '')}", flush=True)
 
     def _kline(self, d: dict[str, Any]) -> None:
         k = d.get("k", {})
