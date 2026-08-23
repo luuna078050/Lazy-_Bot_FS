@@ -15,6 +15,13 @@ def _signal(ex,symbol):
 def _close(symbol,pos,last,reason):
  gross=(last-pos['entry_price'])*pos['amount']; fee=(pos['entry_price']*pos['amount']+last*pos['amount'])*pos['fee_pct']/100; net=gross-fee
  _state['balance']+=pos['allocated_usdt']+net; _state['pnl']+=net; _state['trades'].append({'symbol':symbol,'side':'SELL','entry_price':pos['entry_price'],'exit_price':last,'amount':pos['amount'],'gross_pnl':gross,'fee':fee,'net_pnl':net,'reason':reason,'opened_at':pos['opened_at'],'closed_at':_now(),'fills':list(pos.get('fills',[])),'fill_count':len(pos.get('fills',[])),'signal':pos.get('signal')}); _state['open_positions'].pop(symbol,None); _state['orders'].pop(symbol,None)
+def _promote_partial_orders():
+ for symbol,order in list(_state['orders'].items()):
+  filled=float(order.get('filled_amount') or 0); fills=list(order.get('fills') or [])
+  if filled<=0 or not fills: continue
+  avg=sum(float(f.get('amount',0))*float(f.get('price',0)) for f in fills)/filled; allocated=sum(float(f.get('cost',0)) for f in fills)
+  _state['open_positions'][symbol]={'symbol':symbol,'entry_price':avg,'amount':filled,'allocated_usdt':allocated,'opened_at':fills[0].get('time',_now()),'opened_ts':time.time(),'fee_pct':_state['config']['fee_pct'],'signal':order.get('signal','NORMAL'),'hold_seconds':order.get('hold_seconds',_state['config'].get('max_hold',180)),'pump_score':order.get('pump_score',0),'fills':fills,'stage':'OPEN_AFTER_STOP'}
+ _state['orders'].clear()
 def _tick(symbol,allocation,target,minp,sl,maxhold,gateway):
  try:
   ex=gateway('binance').exchange; t=ex.fetch_ticker(symbol); last=float(t.get('last') or 0); pct=float(t.get('percentage') or 0)
@@ -33,7 +40,7 @@ def _tick(symbol,allocation,target,minp,sl,maxhold,gateway):
     if chunk<=0:return
     cost=chunk*last; _state['balance']-=cost; order['fills'].append({'time':_now(),'amount':chunk,'price':last,'cost':cost}); order['filled_amount']+=chunk; order['remaining_amount']-=chunk; order['status']='FILLED' if order['remaining_amount']<=order['requested_amount']*.00001 else 'PARTIALLY_FILLED'
     if order['status']=='FILLED':
-     avg=sum(f['amount']*f['price'] for f in order['fills'])/order['filled_amount']; sig=order.get('signal','NORMAL'); _state['open_positions'][symbol]={'symbol':symbol,'entry_price':avg,'amount':order['filled_amount'],'allocated_usdt':sum(f['cost'] for f in order['fills']),'opened_at':order['fills'][0]['time'],'opened_ts':time.time(),'fee_pct':_state['config']['fee_pct'],'signal_24h_pct':pct,'fills':list(order['fills']),'signal':sig,'hold_seconds':order.get('hold_seconds',maxhold),'pump_score':order.get('pump_score',0)}
+     avg=sum(f['amount']*f['price'] for f in order['fills'])/order['filled_amount']; sig=order.get('signal','NORMAL'); _state['open_positions'][symbol]={'symbol':symbol,'entry_price':avg,'amount':order['filled_amount'],'allocated_usdt':sum(f['cost'] for f in order['fills']),'opened_at':order['fills'][0]['time'],'opened_ts':time.time(),'fee_pct':_state['config']['fee_pct'],'signal_24h_pct':pct,'fills':list(order['fills']),'signal':sig,'hold_seconds':order.get('hold_seconds',maxhold),'pump_score':order.get('pump_score',0)}; _state['orders'].pop(symbol,None)
     return
    sig=_signal(ex,symbol)
    if not (pct>=.15 or sig['signal']=='PUMP') or _state['balance']<=0 or allocation<=0:return
@@ -59,7 +66,8 @@ def start_paper(config,gateway):
  _thread=threading.Thread(target=_loop,args=(gateway,),daemon=True);_thread.start();return snapshot()
 def stop_paper(gateway):
  _stop.set()
- with _lock:_state['running']=False;_state['stopped_at']=_now();_state['stop_type']='STOP'
+ with _lock:
+  _promote_partial_orders(); _state['running']=False;_state['stopped_at']=_now();_state['stop_type']='STOP'
  return snapshot()
 def emergency_stop_paper(gateway):
  _stop.set()
