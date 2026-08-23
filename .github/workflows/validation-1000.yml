@@ -5,6 +5,7 @@ on:
       - 'scripts/validate_1000.py'
       - 'app/strategy_intelligence.py'
       - 'app/orderbook_pressure.py'
+      - 'tests/test_strategy_intelligence.py'
 jobs:
   validate:
     runs-on: ubuntu-latest
