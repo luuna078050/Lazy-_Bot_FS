@@ -119,15 +119,18 @@ class MarketRadar:
     def _on_open(self, _ws) -> None:
         self.connected = True
         self.last_error = None
+        print("RADAR_WS_CONNECTED", flush=True)
 
     def _on_close(self, _ws, close_status_code=None, close_msg=None) -> None:
         self.connected = False
+        print(f"RADAR_WS_CLOSED {close_status_code} {close_msg or ''}", flush=True)
         if close_status_code:
             self.last_error = f"WebSocket closed: {close_status_code} {close_msg or ''}".strip()
 
     def _on_error(self, _ws, error) -> None:
         self.connected = False
         self.last_error = str(error)[:300]
+        print(f"RADAR_WS_ERROR {self.last_error}", flush=True)
 
     def _on_message(self, _ws, raw) -> None:
         try:
@@ -311,3 +314,5 @@ class MarketRadar:
 
 
 RADAR = MarketRadar(20)
+# Start the market stream as the web service starts; the dashboard never
+aRADAR.start()
