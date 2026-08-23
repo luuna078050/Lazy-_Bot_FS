@@ -34,7 +34,7 @@ def micro_entry(ex, state: dict, pulse: dict, bot_balance: float, allocation_pct
     """Paper/live guarded micro-entry. Returns an event dict or None."""
     if not pulse_entry_allowed(pulse, float(os.getenv("PULSE_MIN_SCORE", "0.72"))):
         return None
-    if not os.getenv("PULSE_EXECUTION_ENABLED", "true").lower() == "true":
+    if os.getenv("PULSE_EXECUTION_ENABLED", "true").lower() != "true":
         return None
     if len(state.get("positions", {})) >= max_positions:
         return None
@@ -54,7 +54,7 @@ def micro_entry(ex, state: dict, pulse: dict, bot_balance: float, allocation_pct
         return None
     price = float(pulse["price"])
     budget = bot_balance * allocation_pct / 100.0
-    amount = float(ex.amount_to_precision(symbol, budget / price))
+    amount = float(ex.exchange.amount_to_precision(symbol, budget / price))
     if amount <= 0:
         return None
     order = ex.create_market_order(symbol, "buy", amount, live=live_enabled())
