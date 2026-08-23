@@ -29,7 +29,14 @@ def install(app):
             js = "<script>(function(){document.addEventListener('DOMContentLoaded',function(){var t=document.getElementById('total');if(t){t.insertAdjacentHTML('afterend','<div class=\"allocation-fix-note\">Если сумма выше 100%, запуск автоматически нормализует доли до 100% с сохранением пропорций.</div>')}})})();</script>"
             html = html.replace('</body>', js + '</body>', 1)
 
-            route_response = HTMLResponse(content=html, status_code=getattr(response, 'status_code', 200), headers=dict(getattr(response, 'headers', {}) or {}), media_type='text/html')
+            # The response body was modified, so the previous Content-Length is
+            # invalid. Strip it before creating the replacement HTMLResponse.
+            headers = dict(getattr(response, 'headers', {}) or {})
+            headers.pop('content-length', None)
+            headers.pop('Content-Length', None)
+            headers.pop('content-type', None)
+            headers.pop('Content-Type', None)
+            route_response = HTMLResponse(content=html, status_code=getattr(response, 'status_code', 200), headers=headers, media_type='text/html')
             return route_response
 
         endpoint._allocation_fix_wrapped = True
