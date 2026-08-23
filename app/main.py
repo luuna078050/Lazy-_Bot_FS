@@ -13,6 +13,6 @@ def _defer_radar_start(self, *args, **kwargs):
 
 threading.Thread.start = _defer_radar_start
 try:
-    from .ui_v4 import app
+    from .ui_v5 import app
 finally:
     threading.Thread.start = _original_thread_start
