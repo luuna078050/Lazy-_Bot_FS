@@ -1,24 +1,38 @@
 # LazyBot FS
 
-**FS = Fast Scalper.** Unified working baseline for the fast-scalper features, with Pchelka integration.
+**FS = Fast Scalper.** Unified working baseline for fast-scalper features, with Pchelka integration.
 
 ## Included
 - Binance / CCXT spot exchange adapter
 - multi-pair radar and capital-slot allocation
+- separate exchange account balance vs user-assigned **bot account balance**
+- bot balance can be configured by fixed amount or percentage of account balance
 - paper/live execution separation
 - position sizing and leverage limits
 - TP/SL and daily loss guard
 - Telegram notifications adapter
 - Pchelka research adapter
 - signal/risk/execution separation
-- **dynamic order-book pressure:** imbalance, relative walls, wall persistence and spoof-risk detection
+- dynamic order-book pressure: imbalance, relative walls, wall persistence and spoof-risk detection
 - regime-aware MTF intelligence: 4h/2h/1h/30m/15m/5m/3m/1m + optional micro-flow
 - MA7/25/99, RSI14, Stochastic14, trend smoothness and impulse/pullback/retest/breakout structure
+
+## Capital policy
+The **bot account balance** is the capital the user assigns to this bot. It is not the whole exchange account balance. The user may allocate it by fixed amount or percentage of the account balance.
+
+The user may manually assign up to **100% of the bot account balance** to one position if they explicitly choose to do so.
+
+The separate **automatic allocation policy** is more conservative: while automatic allocation is enabled, the bot itself may use **at most 40% of bot account balance for one position**. This 40% limit does NOT restrict a user's manual allocation choice.
+
+Automatic dynamic allocation is initially frozen during the validation period. After validation, it may size positions from signal quality, subject to the 40% automatic cap.
+
+## Commercial policy
+Commercial mode is locked until the validated strategy effectiveness reaches at least **75%**. Profit share is **0.1% (0.001)** of positive realized **net** profit only. No profit share is charged on losing trades.
 
 ## Live 20 USDT test
 The ready runner is `scripts/live_scalper_20.py`.
 
-It is **paper by default**. The real-test profile is `.env.real20.example` and is intentionally not armed. The runner scans a liquid spot universe, builds a top-10 radar, and can use up to five fixed slots: **10%, 10%, 20%, 20%, 30%** of the 20 USDT test capital, leaving 10% reserve. No leverage and no withdrawals.
+It is **paper by default**. The real-test profile is `.env.real20.example` and is intentionally not armed. No leverage and no withdrawals.
 
 Install:
 ```bash
