@@ -1,8 +1,7 @@
 """Exchange-agnostic trading gateway for LazyBot FS.
 
-Uses CCXT for normalized market/account/order access. Live trading stays opt-in.
-Regional eligibility is treated as an account capability, not inferred from the
-existence of a public market symbol.
+Uses CCXT for normalized market/account/order access. Live trading remains
+explicitly controlled by LIVE_TRADING in the deployment environment.
 """
 from __future__ import annotations
 import os
@@ -33,6 +32,19 @@ class ExchangeGateway:
     def public_capabilities(self):
         markets=self.load_markets(); spot=[s for s,m in markets.items() if m.get("spot") and m.get("active",True)]
         return {"exchange":self.id,"spot_markets":len(spot),"has":{k:bool(v) for k,v in self.exchange.has.items() if k in {"fetchBalance","fetchCurrencies","fetchOrderBook","fetchTicker","createOrder","withdraw","fetchDepositAddress","fetchTradingFee"}}}
+    def market_entry_requirements(self,symbol:str):
+        markets=self.load_markets(); market=markets.get(symbol)
+        if not market or not market.get("active",True):raise ValueError("symbol_not_available")
+        if not market.get("spot"):raise ValueError("not_spot_market")
+        limits=market.get("limits") or {}; amount_limits=limits.get("amount") or {}; cost_limits=limits.get("cost") or {}
+        amount_min=amount_limits.get("min"); cost_min=cost_limits.get("min")
+        precision=(market.get("precision") or {}).get("amount")
+        ticker=self.exchange.fetch_ticker(symbol); price=float(ticker.get("ask") or ticker.get("last") or 0)
+        min_amount=float(amount_min) if amount_min is not None else None
+        min_cost=float(cost_min) if cost_min is not None else None
+        if min_amount is not None and price>0:min_cost=max(min_cost or 0.0,min_amount*price)
+        quote=market.get("quote")
+        return {"exchange":self.id,"symbol":symbol,"base":market.get("base"),"quote":quote,"current_ask":price,"minimum_amount":min_amount,"minimum_cost":min_cost,"amount_precision":precision,"minimum_entry_note":f"Минимальный вход: {min_cost:.8g} {quote}" if min_cost else "Минимальный вход определяется биржей при исполнении"}
     def account_preflight(self,symbol:str|None=None):
         result={"exchange":self.id,"eligible":True,"errors":[]}; markets=self.load_markets()
         if symbol:
@@ -51,10 +63,7 @@ class ExchangeGateway:
         return None
     def find_quote_options(self,base:str,quotes:list[str]|None=None)->list[str]:
         quotes=[q.upper() for q in (quotes or ["USDC","USDT","EUR","USD","BTC","ETH"])]
-        markets=self.load_markets();out=[]
-        for q in quotes:
-            if self.resolve_spot_symbol(base,q):out.append(q)
-        return out
+        return [q for q in quotes if self.resolve_spot_symbol(base,q)]
     def fetch_order_book(self,symbol:str,limit:int=20):self.load_markets();return self.exchange.fetch_order_book(symbol,limit=limit)
     def fetch_balance(self):return self.exchange.fetch_balance()
     def create_limit_order(self,symbol:str,side:str,amount:float,price:float,live:bool=False):
