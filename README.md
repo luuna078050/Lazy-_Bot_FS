@@ -9,6 +9,7 @@
 - bot balance can be configured by fixed amount or percentage of account balance
 - paper/live execution separation
 - position sizing and leverage limits
+- money/time profit targeting plus optional percentage TP mode
 - TP/SL with a **user-controlled SL switch** and daily loss guard
 - Telegram notifications adapter
 - Pchelka research adapter
@@ -18,14 +19,36 @@
 - MA7/25/99, RSI14, Stochastic14, trend smoothness and impulse/pullback/retest/breakout structure
 - **Rocket Hunter** for early acceleration / ignition detection rather than late pump chasing
 
+## Money + time profit mode
+
+The main scalper profile no longer has to think in percentages. It can work from two plain-language targets:
+
+1. **Profit per one unit of allocated capital** — e.g. `0.25` means the bot aims for 0.25 units of net profit for each 1 unit allocated to the trade.
+2. **Target interval between completed trades** — e.g. `90` seconds means the bot tries to recycle completed trades around every 1.5 minutes.
+
+There is also a lower profit floor. With the default profile:
+
+- target: **0.25 per 1 unit**;
+- floor: **0.20 per 1 unit**;
+- target interval: **90 seconds**;
+- maximum hold budget for a still-valid non-losing position: **180 seconds**.
+
+If the full money target is reached early, the bot closes. At 90 seconds it may accept the lower floor to increase turnover. At 180 seconds it may recycle a non-losing still-valid position. An underwater position is not forced closed by this time policy; the separate SL switch controls loss-based protection.
+
+The interval is a **throughput target, not a promise**. The bot must not create weak entries just to hit the clock. It increases the chance of higher turnover through multi-pair scanning/ranking and multiple controlled positions.
+
+`ESTIMATED_ROUND_TRIP_FEE_PCT` can be supplied so the money target is evaluated against estimated net profit rather than gross price movement.
+
+The legacy percentage TP remains available when `PROFIT_TARGET_MODE=percent`. The default is `money_time`.
+
 ## Exit policy / SL checkbox
 
-The scalper keeps **Take Profit** independent from **Stop Loss**.
+The scalper keeps the profit target independent from **Stop Loss**.
 
 **☑ Ограничение убытка (SL)**
 - the configured stop-loss level is enforced;
 - a position can be closed at the SL level;
-- TP remains active.
+- the money/time profit target remains active.
 
 **☐ Ограничение убытка (SL)**
 - no fixed loss-based stop is applied;
@@ -34,8 +57,6 @@ The scalper keeps **Take Profit** independent from **Stop Loss**.
 - profitable confirmed reversal exits remain allowed.
 
 The setting is exposed through `/api/settings/risk` and `/api/settings/risk/stop-loss`, persisted in `scalper_settings.json`, and has a visible browser control at `/settings/risk`. The default remains **enabled** so the existing protective behavior is preserved until the user deliberately switches it off.
-
-This is intentionally compatible with the Lazy Scalper philosophy: SL is an optional protection layer, not a mandatory strategy assumption. The strategy can therefore operate either in a protected mode or in a wait-for-recovery mode without changing Rocket Hunter's entry logic.
 
 ## Rocket Hunter
 
@@ -89,7 +110,7 @@ State is kept in `scalper_state.json` so a normal restart does not intentionally
 The order-book module is evidence-based: a large wall is not automatically treated as support/resistance. It tracks repeated snapshots, detects walls that disappear before price reaches them, and reduces confidence when spoof-risk rises.
 
 ## Architecture
-`Pchelka -> research/evidence -> market + orderbook microstructure -> Rocket Hunter / LazyBot FS -> signal -> risk -> execution`
+`Pchelka -> research/evidence -> market + orderbook microstructure -> Rocket Hunter / LazyBot FS -> signal -> risk -> money/time target -> execution`
 
 Pchelka is research-only and never places trades. LazyBot FS remains the specialized fast-scalper brain.
 
