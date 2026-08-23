@@ -33,7 +33,7 @@ The scalper keeps **Take Profit** independent from **Stop Loss**.
 - a bearish reversal by itself does not close an underwater position;
 - profitable confirmed reversal exits remain allowed.
 
-The setting is exposed through `/api/settings/risk` and `/api/settings/risk/stop-loss` and is persisted in `scalper_settings.json`. The default remains **enabled** so the existing protective behavior is preserved until the user deliberately switches it off.
+The setting is exposed through `/api/settings/risk` and `/api/settings/risk/stop-loss`, persisted in `scalper_settings.json`, and has a visible browser control at `/settings/risk`. The default remains **enabled** so the existing protective behavior is preserved until the user deliberately switches it off.
 
 This is intentionally compatible with the Lazy Scalper philosophy: SL is an optional protection layer, not a mandatory strategy assumption. The strategy can therefore operate either in a protected mode or in a wait-for-recovery mode without changing Rocket Hunter's entry logic.
 
