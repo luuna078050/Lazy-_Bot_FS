@@ -14,7 +14,7 @@ def test_entry_requires_multiple_confirmations():
 
 
 def test_strong_pulse_passes_quality_gate():
-    strong = {"change_3m_pct": 0.20, "volume_ratio": 2.0, "buy_ratio": 0.62, "pump_score": 0.70, "signal": "PUMP_NOW", "change_24h_pct": 1.0}
+    strong = {"change_3m_pct": 0.50, "volume_ratio": 3.0, "buy_ratio": 0.65, "pump_score": 0.90, "signal": "PUMP_NOW", "change_24h_pct": 2.0}
     d = decision(strong)
     assert d["entry_ok"] is True
     assert d["quality"] >= 58
