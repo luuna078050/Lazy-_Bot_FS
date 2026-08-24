@@ -1,16 +1,9 @@
 from __future__ import annotations
 
-# Final mobile control patch for Fast Scalper.
-# Keep PAPER/LIVE controls side-by-side on phones and make the switches
-# authoritative: the visual state changes only after the API confirms success.
-
 def install(app):
     route = next((r for r in app.router.routes if getattr(r, "path", None) == "/"), None)
     if route is None:
         return
-
-    # ui_v7 stores the dashboard in module global SKIN; import it and patch it
-    # before the root route is executed.
     from . import ui_v7
 
     css = r'''<style id="fs-final-controls">
@@ -40,59 +33,65 @@ def install(app):
       const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;
       tm.textContent=[h,m,s].map(x=>String(x).padStart(2,'0')).join(':');
     };
-    tick();
-    if(on) timers[mode]=setInterval(tick,1000);
-  }
-  async function report(mode){
-    const r=await fetch('/api/session/report/'+mode,{cache:'no-store'});
-    if(!r.ok)throw new Error('Сервис отчёта недоступен');
-    return await r.json();
+    tick(); if(on) timers[mode]=setInterval(tick,1000);
   }
   async function sync(mode){
-    try{const d=await report(mode);paint(mode,!!d.running,d.started_at?Number(d.started_at)*1000:Date.now());return d}catch(e){return null}
+    try{
+      const r=await fetch('/api/session/report/'+mode,{cache:'no-store'});
+      if(!r.ok) return null;
+      const d=await r.json();
+      paint(mode,!!d.running,d.started_at?Number(d.started_at)*1000:Date.now());
+      return d;
+    }catch(e){return null}
+  }
+  const originalCfg = window.cfg;
+  if(typeof originalCfg==='function'){
+    window.cfg=function(mode){
+      const c=originalCfg(mode);
+      const n=(c.pairs||[]).length;
+      if(n){
+        let a=(c.allocations||[]).map(x=>Number(x)||0);
+        let total=a.reduce((s,x)=>s+x,0);
+        if(total<100){
+          const add=(100-total)/n;
+          a=a.map(x=>x+add);
+          c.allocations=a;
+        }
+      }
+      return c;
+    };
   }
   async function run(mode){
     try{
-      if(typeof cfg!=='function')throw new Error('Конфигурация интерфейса не загружена');
-      const c=cfg(mode);
-      const total=(c.allocations||[]).reduce((a,b)=>a+(Number(b)||0),0);
+      if(typeof window.cfg!=='function')throw new Error('Конфигурация интерфейса не загружена');
+      const c=window.cfg(mode);
       if(!(c.pairs||[]).length){alert('Нет выбранных '+mode+' пар');return false}
-      if(Math.abs(total-100)>.01){alert(mode+': нужно распределить 100% капитала. Сейчас '+total.toFixed(2)+'%.');return false}
+      const total=(c.allocations||[]).reduce((a,b)=>a+(Number(b)||0),0);
+      if(total>100.01){alert(mode+': распределение больше 100%');return false}
       if(mode==='LIVE'){
         c.api_key=$('key')?.value||'';
         c.api_secret=$('secret')?.value||'';
         if(!c.api_key||!c.api_secret){alert('Для LIVE нужны API Key и Secret');return false}
       }
       const r=await fetch('/api/'+mode.toLowerCase()+'/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(c),cache:'no-store'});
-      let d={};try{d=await r.json()}catch(e){}
+      let d={}; try{d=await r.json()}catch(e){}
       if(!r.ok || d.running===false){alert(d.detail||('Не удалось запустить '+mode));await sync(mode);return false}
-      await sync(mode);
-      return true;
+      await sync(mode); return true;
     }catch(e){alert('Ошибка запуска '+mode+': '+e.message);return false}
   }
   async function halt(mode){
     try{
       const r=await fetch('/api/'+mode.toLowerCase()+'/stop',{method:'POST',cache:'no-store'});
-      await sync(mode);
-      return r.ok;
+      await sync(mode); return r.ok;
     }catch(e){await sync(mode);return false}
   }
   window.toggleRun=async function(mode){
     const sw=$(mode.toLowerCase()+'Switch');
-    const on=!!(sw&&sw.classList.contains('on'));
-    if(on){await halt(mode);return}
-    await run(mode);
+    if(sw&&sw.classList.contains('on')) return halt(mode);
+    return run(mode);
   };
-  function bind(){
-    for(const mode of ['PAPER','LIVE']){
-      const b=$(mode.toLowerCase()+'Switch');
-      if(!b||b.dataset.fsBound)return;
-      b.dataset.fsBound='1';
-      b.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();window.toggleRun(mode)});
-    }
-    sync('PAPER');sync('LIVE');
-  }
-  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',bind);else bind();
+  function boot(){sync('PAPER');sync('LIVE')}
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',boot);else boot();
 })();
 </script>'''
     if 'id="fs-final-control-js"' not in ui_v7.SKIN:
