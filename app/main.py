@@ -21,6 +21,11 @@ try:
     from .report_v7_patch import install as _install_report_v7
     from .ui_controls_patch import install as _install_ui_controls
     from .final_ui_patch import install as _install_final_ui
+    from .paper_engine_bridge import install as _install_paper_engine
+
+    # Keep UI/report/state on the same PAPER engine. This replaces the old
+    # REST-polling engine with the WebSocket-backed test engine before routes run.
+    _install_paper_engine()
     _install_paper_mode(app)
     _install_allocation_fix(app)
     _install_report_v6()
