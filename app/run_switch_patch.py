@@ -24,7 +24,14 @@ def install(app):
   sync(); setInterval(sync,1500);
 })();
 </script>'''
-            return HTMLResponse(content=html.replace('</body>',js+'</body>',1),status_code=getattr(response,'status_code',200),headers=dict(getattr(response,'headers',{}) or {}),media_type='text/html')
+            # The HTML body is changed after the previous response calculated
+            # Content-Length. Remove the stale header before sending the new body.
+            headers = dict(getattr(response, 'headers', {}) or {})
+            headers.pop('content-length', None)
+            headers.pop('Content-Length', None)
+            headers.pop('content-type', None)
+            headers.pop('Content-Type', None)
+            return HTMLResponse(content=html.replace('</body>',js+'</body>',1),status_code=getattr(response,'status_code',200),headers=headers,media_type='text/html')
         endpoint._run_switch_v6_wrapped = True
         route.endpoint = endpoint
         route.app = request_response(endpoint)
