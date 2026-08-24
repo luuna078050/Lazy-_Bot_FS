@@ -12,6 +12,17 @@ for route in list(app.router.routes):
 
 SKIN = BASE_SKIN
 
+# Clean migration: never reuse the old five-slot presets. The first v7 load
+# starts with empty pair slots; later user choices persist under the new key.
+SKIN = SKIN.replace("localStorage.getItem('fsSlots')", "localStorage.getItem('fsSlotsV2')")
+SKIN = SKIN.replace("localStorage.setItem('fsSlots',", "localStorage.setItem('fsSlotsV2',")
+SKIN = SKIN.replace("Array.from({length:5}", "Array.from({length:6}")
+SKIN = SKIN.replace("Все 5 слотов заняты", "Все 6 слотов заняты")
+SKIN = SKIN.replace("0 / 5", "0 / 6")
+SKIN = SKIN.replace("p.length*20", "p.length*16.6667")
+# Empty allocation inputs clear the default zero as soon as the user focuses them.
+SKIN = SKIN.replace("value=\"${x.v}\" oninput=", "value=\"${x.v}\" onfocus=\"if(this.value==='0')this.value=''\" oninput=")
+
 old = re.search(r'<div class="bot-summary">.*?</div></section>', SKIN, flags=re.S)
 if not old:
     raise RuntimeError('Fast Scalper capital summary block not found')
@@ -58,10 +69,8 @@ REPORT_JS = r'''<script>
 </script>'''
 SKIN = SKIN.replace('</body>', REPORT_JS + '</body>', 1)
 
-# Do not wrap the FastAPI root route. The previous start-guard wrapper caused
-# Render 502s. Install the authoritative PAPER/LIVE controls directly in the
-# page instead: timers start only after a successful API response and stop only
-# after the stop API call completes.
+# Authoritative PAPER/LIVE controls: timers start only after a successful API
+# response, and stop only after the stop API call completes.
 RUN_JS = r'''<script>
 (function(){
   const $=id=>document.getElementById(id);
@@ -106,15 +115,16 @@ RUN_JS = r'''<script>
       const c=cfg(mode);
       const total=(c.allocations||[]).reduce((a,b)=>a+b,0);
       if(!(c.pairs||[]).length){alert('Нет выбранных '+mode+' пар');paint(mode,false);return false}
-      if(Math.abs(total-100)>.01){alert(mode+': нужно 100%, сейчас '+total.toFixed(2)+'%');paint(mode,false);return false}
+      if(Math.abs(total-100)>.01){alert(mode+': нужно 100%, сейчас '+total.toFixed(2)+'%. Выбери пары — их доли распределяются автоматически.');paint(mode,false);return false}
       if(mode==='LIVE'){
         c.api_key=$('key')?.value||'';
         c.api_secret=$('secret')?.value||'';
         if(!c.api_key||!c.api_secret){alert('Для LIVE нужны API Key и Secret');paint(mode,false);return false}
       }
       const r=await fetch('/api/'+mode.toLowerCase()+'/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(c),cache:'no-store'});
+      const raw=await r.text();
       let d={};
-      try{d=await r.json()}catch(e){}
+      try{d=JSON.parse(raw)}catch(e){d={detail:raw.slice(0,300)}}
       if(!r.ok||!d.running){alert(d.detail||'Ошибка запуска '+mode);paint(mode,false);return false}
       await sync(mode);
       return true;
@@ -144,9 +154,6 @@ RUN_JS = r'''<script>
   async function boot(){
     await sync('PAPER');
     await sync('LIVE');
-    const p=localStorage.getItem(storageKey('PAPER')), l=localStorage.getItem(storageKey('LIVE'));
-    if(p&&!$('paperSwitch')?.classList.contains('on'))localStorage.removeItem(storageKey('PAPER'));
-    if(l&&!$('liveSwitch')?.classList.contains('on'))localStorage.removeItem(storageKey('LIVE'));
   }
   boot();
   setInterval(()=>{sync('PAPER');sync('LIVE')},3000);
@@ -154,6 +161,40 @@ RUN_JS = r'''<script>
 </script>'''
 SKIN = SKIN.replace('</body>', RUN_JS + '</body>', 1)
 
+# Six-pair ranking table: three cards per row, green score and green select button.
+TOP6_CSS_JS = r'''<style>
+.top-table{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:8px}.top-cell{border:1px solid #451015;border-radius:10px;background:#08090a;padding:9px;min-width:0}.top-rank{font-weight:900;color:#fff;font-size:15px}.top-symbol{font-weight:900;color:#fff;font-size:15px}.top-score{color:#22e36f;font-weight:900;font-size:18px;float:right}.top-meta{color:#aaa;font-size:11px;line-height:1.35;margin-top:4px}.top-pick{width:100%;border:1px solid #22e36f;background:#0e793b;color:#fff;border-radius:7px;padding:7px;font-weight:900;margin-top:7px}.top-pick.selected{background:#16a34a;box-shadow:0 0 8px rgba(34,227,111,.22)}@media(max-width:700px){.top-table{grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}.top-cell{padding:7px}.top-symbol,.top-rank{font-size:13px}.top-score{font-size:15px}.top-meta{font-size:10px}}
+</style>
+<script>
+(function(){
+  const oldRecs=window.recs;
+  if(!oldRecs)return;
+  window.recs=async function(){
+    try{
+      const r=await fetch('/api/recommendations?limit=20',{cache:'no-store'});
+      const d=await r.json();
+      if(!r.ok)throw new Error(d.detail||'Ошибка радара');
+      const rows=(d.candidates20||[]).slice(0,6);
+      const top=document.getElementById('top');
+      if(!top)return;
+      if(!rows.length){top.textContent='Радар пока не дал рекомендаций';return}
+      top.innerHTML='<div class="top-table">'+rows.map((x,i)=>{
+        const selected=[...document.querySelectorAll('.top-select.selected')].some(b=>b.dataset.symbol===x.symbol);
+        return '<div class="top-cell"><div class="top-rank">#'+(i+1)+' <span class="top-symbol">'+String(x.symbol||'—')+'</span><span class="top-score">'+(x.score??'—')+'</span></div><div class="top-meta">'+(x.signal||'WAIT')+' • вход '+(x.estimated_entry??'—')+' → '+(x.estimated_exit??'—')+' • '+(x.hold_seconds||180)+'с</div><button class="top-pick '+(selected?'selected':'')+' top-select" data-symbol="'+String(x.symbol||'').replace(/"/g,'&quot;')+'" onclick="pick(this.dataset.symbol)">'+(selected?'✓ ВЫБРАНО':'ВЫБРАТЬ')+'</button></div>';
+      }).join('')+'</div>';
+    }catch(e){const top=document.getElementById('top');if(top)top.textContent='Ошибка радара: '+e.message}
+  };
+  // Re-run once after the new renderer is installed.
+  window.recs();
+})();
+</script>'''
+SKIN = SKIN.replace('</body>', TOP6_CSS_JS + '</body>', 1)
+
+# Always return a fresh HTML document. This prevents Chrome from retaining the
+# previous broken cached document after a Render deploy.
 @app.get('/', response_class=HTMLResponse)
 def home():
-    return SKIN
+    return HTMLResponse(
+        content=SKIN,
+        headers={'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0','Pragma':'no-cache','Expires':'0'},
+    )
