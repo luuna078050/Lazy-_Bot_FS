@@ -4,12 +4,15 @@ from collections import defaultdict, deque
 from statistics import median
 from typing import Any
 import websocket
+
 STABLE_BASES={"USDT","USDC","FDUSD","USDE","TUSD","DAI","USD1","USDS","EUR"}
 FALLBACK=["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","TRXUSDT","LINKUSDT","AVAXUSDT","SUIUSDT","TONUSDT","LTCUSDT","DOTUSDT","BCHUSDT","NEARUSDT","APTUSDT","ATOMUSDT","UNIUSDT","FILUSDT"]
-TF=("1m","3m","5m","15m","30m")
+TF_ANALYSIS=("1m","3m","5m","15m","30m")
+TF_UI=("1m","3m","5m")
+
 class MarketRadar:
  def __init__(self,top_n=20):
-  self.top_n=max(10,min(int(top_n),20));self.lock=threading.RLock();self.tickers={};self.bars=defaultdict(lambda:defaultdict(lambda:deque(maxlen=240)));self.pulses=defaultdict(lambda:deque(maxlen=180));self.depth=defaultdict(lambda:{"bids":[],"asks":[]});self.wall_history=defaultdict(lambda:deque(maxlen=180));self._ws=None;self._stop=threading.Event();self._thread=None;self._ready=threading.Event();self.last_error=None;self.last_update=0.;self.connected=False;self.connection_url="";self.message_count=0;self._rank_cache=[];self._rank_at=0.;self._rank_lock=threading.RLock()
+  self.top_n=max(10,min(int(top_n),20));self.lock=threading.RLock();self.tickers={};self.bars=defaultdict(lambda:defaultdict(lambda:deque(maxlen=240)));self.pulses=defaultdict(lambda:deque(maxlen=180));self.depth=defaultdict(lambda:{"bids":[],"asks":[]});self.wall_history=defaultdict(lambda:deque(maxlen=900));self._ws=None;self._stop=threading.Event();self._thread=None;self._ready=threading.Event();self.last_error=None;self.last_update=0.;self.connected=False;self.connection_url="";self.message_count=0;self._rank_cache=[];self._rank_at=0.;self._rank_lock=threading.RLock()
  def start(self):
   if self._thread and self._thread.is_alive():return
   self._stop.clear();self._thread=threading.Thread(target=self._run,daemon=True,name="fast-scalper-radar");self._thread.start()
@@ -24,7 +27,7 @@ class MarketRadar:
   with self.lock:rows=[(s,d) for s,d in self.tickers.items() if s.endswith("USDT") and s[:-4] not in STABLE_BASES and float(d.get("q",0) or 0)>=10000]
   rows.sort(key=lambda x:float(x[1].get("q",0) or 0),reverse=True);return [s for s,_ in rows[:self.top_n]] or FALLBACK[:self.top_n]
  def _build_url(self):
-  ss=self._top_symbols();streams=["!miniTicker@arr"];streams += [f"{s.lower()}@kline_{tf}" for s in ss for tf in TF];streams += [f"{s.lower()}@aggTrade" for s in ss];streams += [f"{s.lower()}@depth20@100ms" for s in ss];return "wss://stream.binance.com:443/stream?streams="+"/".join(streams)
+  ss=self._top_symbols();streams=["!miniTicker@arr"];streams += [f"{s.lower()}@kline_{tf}" for s in ss for tf in TF_ANALYSIS];streams += [f"{s.lower()}@aggTrade" for s in ss];streams += [f"{s.lower()}@depth20@100ms" for s in ss];return "wss://stream.binance.com:443/stream?streams="+"/".join(streams)
  def _run(self):
   while not self._stop.is_set():
    self.connection_url=self._build_url()
@@ -50,7 +53,7 @@ class MarketRadar:
   with self.lock:self.tickers[s]=dict(d);self.last_update=time.time();self._ready.set()
  def _kline(self,d):
   k=d.get("k",{});s=str(k.get("s","")).upper();tf=str(k.get("i","3m"))
-  if not s or tf not in TF:return
+  if not s or tf not in TF_ANALYSIS:return
   r={"ts":float(k.get("t",0))/1000,"open":float(k.get("o",0) or 0),"high":float(k.get("h",0) or 0),"low":float(k.get("l",0) or 0),"close":float(k.get("c",0) or 0),"quote_volume":float(k.get("q",0) or 0),"closed":bool(k.get("x"))}
   with self.lock:
    q=self.bars[s][tf]
@@ -81,7 +84,7 @@ class MarketRadar:
  def _clamp(v,a=0.,b=1.):return min(b,max(a,float(v)))
  def _tf(self,s,price):
   out={}
-  for tf in TF:
+  for tf in TF_ANALYSIS:
    with self.lock:bars=list(self.bars[s][tf])
    if not bars:out[tf]={"change_pct":0.,"volume_ratio":1.,"trend":0}
    else:
@@ -94,14 +97,23 @@ class MarketRadar:
   if not h:return {"pump_events":0,"pump_score":0.,"signal":"WAIT","buy_ratio":.5,"trade_velocity":0.,"freeze_risk":1.,"hold_seconds":180}
   p=[x["price"] for x in h];latest=p[-1];c3=(latest/p[-4]-1)*100 if len(p)>3 and p[-4]>0 else 0;last=h[-60:];buy=sum(x["buy_quote"] for x in last);q=sum(x["quote"] for x in last);br=buy/q if q else .5;tv=sum(x["trades"] for x in last);ps=min(1.,.5*self._clamp(max(0,c3)/.3)+.5*self._clamp((br-.5)/.2));return {"pump_events":0,"pump_score":round(ps,3),"signal":"PUMP_NOW" if ps>=.65 and c3>=.08 else "NORMAL","buy_ratio":round(br,4),"trade_velocity":round(tv/6,2),"freeze_risk":.25 if tv>20 else .7,"hold_seconds":20 if ps>=.65 and c3>=.08 else 180}
  def wall(self,s,price):
-  with self.lock:h=list(self.wall_history[s])[-60:]
-  if not h:return {"direction":"neutral","score":0.,"bid_wall":None,"ask_wall":None,"bid_shift_pct":0.,"ask_shift_pct":0.,"persistence":0.,"velocity":0.,"spoof_risk":0.}
-  first,last=h[0],h[-1];bs=(last["bid_price"]/first["bid_price"]-1)*100 if first["bid_price"] else 0;as_=(last["ask_price"]/first["ask_price"]-1)*100 if first["ask_price"] else 0;bid=last["bid_quote"];ask=last["ask_quote"];imb=(bid-ask)/(bid+ask) if bid+ask else 0;score=max(-1,min(1,imb*.65+(bs-as_)*.35));direction="bullish" if score>.12 else "bearish" if score<-.12 else "neutral";spoof=min(1.,sum(1 for i in range(1,len(h)) if abs(h[i]["bid_quote"]-h[i-1]["bid_quote"])/(h[i]["bid_quote"] or 1)>.5)/max(1,len(h)-1));return {"direction":direction,"score":round(score,4),"bid_wall":last["bid_price"],"ask_wall":last["ask_price"],"bid_shift_pct":round(bs,4),"ask_shift_pct":round(as_,4),"persistence":round(min(1,len(h)/60),3),"velocity":round(((last["bid_price"]-first["bid_price"])-(last["ask_price"]-first["ask_price"]))/(price or 1),6),"spoof_risk":round(spoof,3)}
+  with self.lock:h=list(self.wall_history[s])
+  if not h:return {"direction":"neutral","score":0.,"bid_wall":None,"ask_wall":None,"bid_shift_pct":0.,"ask_shift_pct":0.,"persistence":0.,"velocity":0.,"spoof_risk":0.,"trend_1m":0.,"trend_3m":0.,"trend_5m":0.,"trend_15m":0.,"trend_30m":0.}
+  now=time.time()
+  def sample(seconds):
+   cut=now-seconds;rows=[x for x in h if x["ts"]>=cut]
+   return rows if len(rows)>=2 else h[-2:]
+  def shift(rows,key):
+   a,b=rows[0],rows[-1];base=float(a[key] or 0);return (float(b[key])-base)/base*100 if base else 0.
+  last=h[-1];bid=last["bid_quote"];ask=last["ask_quote"];imb=(bid-ask)/(bid+ask) if bid+ask else 0
+  bs=shift(h,"bid_price");as_=shift(h,"ask_price");score=max(-1,min(1,imb*.65+(bs-as_)*.35));direction="bullish" if score>.12 else "bearish" if score<-.12 else "neutral";spoof=min(1.,sum(1 for i in range(1,len(h)) if abs(h[i]["bid_quote"]-h[i-1]["bid_quote"])/(h[i]["bid_quote"] or 1)>.5)/max(1,len(h)-1))
+  trends={f"trend_{tf}":round((shift(sample(sec),"bid_price")-shift(sample(sec),"ask_price")),5) for tf,sec in (("1m",60),("3m",180),("5m",300),("15m",900),("30m",1800))}
+  return {"direction":direction,"score":round(score,4),"bid_wall":last["bid_price"],"ask_wall":last["ask_price"],"bid_shift_pct":round(bs,4),"ask_shift_pct":round(as_,4),"persistence":round(min(1,len(h)/180),3),"velocity":round(((last["bid_price"]-h[0]["bid_price"])-(last["ask_price"]-h[0]["ask_price"]))/(price or 1),6),"spoof_risk":round(spoof,3),**trends}
  def analyze(self,s):
   with self.lock:d=dict(self.tickers.get(s) or {})
   price=float(d.get("c",0) or 0)
   if price<=0:return None
-  tf=self._tf(s,price);wall=self.wall(s,price);pulse=self._pulse(s);score=50.;score+=sum(8 if tf[x]["trend"]>0 else -5 if tf[x]["trend"]<0 else 0 for x in TF);score+=wall["score"]*22;score+=pulse["pump_score"]*12;score=max(0,min(100,score));ideal=.30/50*100;ideal*=max(.4,min(1.5,score/70));acceptable=ideal*.77;floor=ideal*.50;projected=max(0.,ideal*(1-wall["spoof_risk"]));direction="LONG" if score>=52 and wall["direction"]!="bearish" else "WAIT";return {"symbol":s[:-4]+"/USDT","price":price,"score":round(score,2),"direction":direction,"tf":tf,"wall":wall,"pulse":pulse,"ideal_pnl_per_min_100":round(ideal,4),"acceptable_pnl_per_min_100":round(acceptable,4),"floor_pnl_per_min_100":round(floor,4),"projected_pnl_per_min_100":round(projected,4),"change_24h_pct":round((price/float(d.get("o",price) or price)-1)*100,3)}
+  all_tf=self._tf(s,price);tf={k:all_tf[k] for k in TF_UI};wall=self.wall(s,price);pulse=self._pulse(s);score=50.;score+=sum(8 if all_tf[x]["trend"]>0 else -5 if all_tf[x]["trend"]<0 else 0 for x in TF_ANALYSIS);score+=wall["score"]*22;score+=pulse["pump_score"]*12;score=max(0,min(100,score));ideal=.30/25*100;ideal*=max(.4,min(1.5,score/70));acceptable=ideal*.77;floor=ideal*.50;projected=max(0.,ideal*(1-wall["spoof_risk"]));direction="LONG" if score>=52 and wall["direction"]!="bearish" else "WAIT";return {"symbol":s[:-4]+"/USDT","price":price,"score":round(score,2),"direction":direction,"tf":tf,"matrix":all_tf,"wall":wall,"pulse":pulse,"ideal_pnl_per_min_100":round(ideal,4),"acceptable_pnl_per_min_100":round(acceptable,4),"floor_pnl_per_min_100":round(floor,4),"projected_pnl_per_min_100":round(projected,4),"change_24h_pct":round((price/float(d.get("o",price) or price)-1)*100,3)}
  def snapshot(self,limit=20,force=False):
   self.start();now=time.time()
   with self._rank_lock:
@@ -111,4 +123,5 @@ class MarketRadar:
   with self._rank_lock:self._rank_cache=rows[:20];self._rank_at=now
   return rows[:limit]
  def symbol_analysis(self,symbol):return self.analyze(symbol.upper().replace('/',''))
+
 RADAR=MarketRadar(20);RADAR.start()
