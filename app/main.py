@@ -20,6 +20,7 @@ from .reinvest_engine_patch import install as _install_reinvest_engine
 from .recent_ui_patch import install as _install_recent_ui
 from .final_fix_v14_patch import install as _install_final_fix_v14
 from .timer_stability_v16_patch import install as _install_timer_stability_v16
+from .wall_dynamics_patch import install as _install_wall_dynamics
 
 _install_paper_mode(app)
 _install_allocation_fix(app)
@@ -38,3 +39,4 @@ _install_reinvest_ui(app)
 _install_recent_ui(app)
 _install_final_fix_v14(app)
 _install_timer_stability_v16(app)
+_install_wall_dynamics()
