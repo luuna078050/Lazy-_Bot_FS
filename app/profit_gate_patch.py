@@ -2,16 +2,24 @@ from __future__ import annotations
 
 from typing import Any
 from . import profit_first_engine as engine
+from .market_radar import RADAR
+
+_ORIGINAL_PULSE = None
+
+
+def _pulse_with_flow(symbol: str) -> dict[str, Any]:
+    global _ORIGINAL_PULSE
+    base = _ORIGINAL_PULSE(symbol) if _ORIGINAL_PULSE else {}
+    with RADAR.lock:
+        h = list(RADAR.pulses.get(symbol, ()))
+    buy_ratio = 0.5
+    if h and h[-1].get("quote", 0):
+        buy_ratio = float(h[-1].get("buy_quote", 0) or 0) / float(h[-1].get("quote", 1) or 1)
+    return {**base, "buy_ratio": buy_ratio}
 
 
 def _decision(m: dict[str, Any]) -> dict[str, Any]:
-    """Practical entry gate: require real momentum/flow, but don't starve PAPER.
-
-    The old gate required 4/5 confirmations and quality >= 58 on a market where
-    the dashboard's live radar commonly scores 35-45. That made PAPER run while
-    producing zero orders. Keep the quality model, but make the initial gate
-    usable and let the adaptive win-rate gate tighten after real trades exist.
-    """
+    """Practical entry gate: require real momentum/flow, but don't starve PAPER."""
     c3 = float(m.get("change_3m_pct", 0) or 0)
     vr = float(m.get("volume_ratio", 1) or 1)
     buy = float(m.get("buy_ratio", 0.5) or 0.5)
@@ -34,9 +42,8 @@ def _decision(m: dict[str, Any]) -> dict[str, Any]:
         c24 >= -0.50,
     ))
     threshold = engine.adaptive_quality_threshold()
-    # Before 8 completed trades, the threshold is intentionally lower so the
-    # paper engine can collect a real sample. After that, the adaptive threshold
-    # takes over and tightens when the observed win rate deteriorates.
+    # Let PAPER collect a real sample first; after 8 closed trades the adaptive
+    # win-rate threshold is used unchanged and can tighten back to 72/66/62/58.
     effective_threshold = min(threshold, 44.0) if len(engine.STATE.get("trades", [])) < 8 else threshold
     entry_ok = (
         signal not in {"WAIT", "FADE"}
@@ -53,4 +60,8 @@ def _decision(m: dict[str, Any]) -> dict[str, Any]:
 
 
 def install() -> None:
+    global _ORIGINAL_PULSE
+    if _ORIGINAL_PULSE is None:
+        _ORIGINAL_PULSE = RADAR._pulse
+        RADAR._pulse = _pulse_with_flow
     engine.decision = _decision
