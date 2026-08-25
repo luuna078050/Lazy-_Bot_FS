@@ -7,7 +7,7 @@ from .pump_detector import analyze_3m_ohlcv
 _state:dict[str,Any]={'running':False,'mode':'paper','started_at':None,'stopped_at':None,'initial_balance':0.0,'balance':0.0,'pnl':0.0,'trades':[],'open_positions':{},'orders':{},'config':{},'error':None,'stop_type':None}
 _lock=threading.Lock(); _thread=None; _stop=threading.Event()
 
-def _now(): return datetime.now(timezone.utc).isoformat()
+def _now(): return time.time()
 
 def snapshot():
     with _lock:return {**_state,'trades':list(_state['trades'][-100:]),'open_positions':{k:dict(v) for k,v in _state['open_positions'].items()},'orders':{k:dict(v) for k,v in _state['orders'].items()}}
@@ -15,7 +15,7 @@ def snapshot():
 def _signal(ex,symbol,timeframe='3m'):
     try:
         pm=analyze_3m_ohlcv(ex.fetch_ohlcv(symbol,timeframe,limit=60)); return {'signal':'PUMP' if pm.get('signal')=='PUMP_NOW' else 'NORMAL','hold':pm.get('hold_seconds',180),'pump_score':pm.get('pump_score',0.0),'volume_ratio':pm.get('volume_ratio',1.0),'change_3m_pct':pm.get('change_3m_pct',0.0),'pump_events':pm.get('pump_events',0)}
-    except Exception:return {'signal':'NORMAL','hold':180,'pump_score':0.0}
+    except Exception:return {'signal':'NORMAL','hold':180,'pump_score':0.0,'change_3m_pct':0.0}
 
 def _close(slot_id,pos,last,reason):
     symbol=pos['symbol']; gross=(last-pos['entry_price'])*pos['amount']; fee=(pos['entry_price']*pos['amount']+last*pos['amount'])*pos['fee_pct']/100; net=gross-fee
@@ -50,7 +50,12 @@ def _tick(slot_id,symbol,timeframe,allocation,target,minp,sl,maxhold,gateway):
                     avg=sum(f['amount']*f['price'] for f in order['fills'])/order['filled_amount']; sig=order.get('signal','NORMAL'); _state['open_positions'][slot_id]={'slot_id':slot_id,'symbol':symbol,'timeframe':timeframe,'entry_price':avg,'amount':order['filled_amount'],'allocated_usdt':sum(f['cost'] for f in order['fills']),'opened_at':order['fills'][0]['time'],'opened_ts':time.time(),'fee_pct':_state['config']['fee_pct'],'signal_24h_pct':pct,'fills':list(order['fills']),'signal':sig,'hold_seconds':order.get('hold_seconds',maxhold),'pump_score':order.get('pump_score',0)}; _state['orders'].pop(slot_id,None)
                 return
             sig=_signal(ex,symbol,timeframe)
-            if not (pct>=.15 or sig['signal']=='PUMP') or _state['balance']<=0 or allocation<=0:return
+            # Entry follows the ranked signal: a PUMP is immediate; otherwise
+            # a small positive short-term move is enough for PAPER to exercise
+            # the strategy instead of sitting idle because 24h % is flat.
+            momentum=float(sig.get('change_3m_pct',0.0) or 0.0)
+            entry_ok=(pct>=.15 or sig['signal']=='PUMP' or momentum>=.05 or float(sig.get('pump_score',0) or 0)>=.35)
+            if not entry_ok or _state['balance']<=0 or allocation<=0:return
             amt=allocation/last; _state['orders'][slot_id]={'slot_id':slot_id,'symbol':symbol,'timeframe':timeframe,'side':'BUY','requested_usdt':allocation,'requested_amount':amt,'filled_amount':0.0,'remaining_amount':amt,'status':'NEW','fills':[],'signal':sig['signal'],'hold_seconds':sig['hold'],'pump_score':sig.get('pump_score',0)}
     except Exception as e:
         with _lock:_state['error']=str(e)[:300]
@@ -62,7 +67,7 @@ def _loop(gateway):
             if _stop.is_set():break
             tf=cfg.get('timeframes',[])[i] if i<len(cfg.get('timeframes',[])) else '3m'; slot_id=f'{i}:{s}:{tf}'
             a=base*cfg['allocations'][i]/100 if i<len(cfg['allocations']) else 0; _tick(slot_id,s,tf,a,cfg['target_usdt'],cfg['min_usdt'],cfg['sl_pct'],cfg['max_hold'],gateway)
-        time.sleep(5)
+        time.sleep(1)
     with _lock:_state['running']=False;_state['stopped_at']=_now()
 
 def start_paper(config,gateway):
