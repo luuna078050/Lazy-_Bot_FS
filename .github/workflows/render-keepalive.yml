@@ -2,8 +2,7 @@ name: Keep Fast Scalper awake
 
 on:
   schedule:
-    # Render Free sleeps after 15 minutes without inbound traffic.
-    # Ping at minute 2, 7, 12, 17... to stay safely below that limit.
+    # Render Free can sleep after inactivity. Keep inbound traffic below that threshold.
     - cron: "2/5 * * * *"
   workflow_dispatch:
 
@@ -11,8 +10,11 @@ jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping Fast Scalper
+      - name: Ping Fast Scalper health
         run: |
-          URL="https://fast-scalper.onrender.com/health"
-          code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 20 "$URL" || true)
-          echo "Fast Scalper response: HTTP $code"
+          for URL in \
+            "https://fast-scalper.onrender.com/api/health" \
+            "https://fast-scalper.onrender.com/"; do
+            code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 20 "$URL" || true)
+            echo "$URL -> HTTP $code"
+          done
