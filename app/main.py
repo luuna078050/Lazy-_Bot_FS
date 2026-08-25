@@ -1,4 +1,4 @@
 from __future__ import annotations
 
-# One authoritative application. No stacked UI/timer patch installers.
-from .stable_boot import app
+# One canonical application. No timer/UI/paper patch installers are loaded.
+from .clean_app import app
