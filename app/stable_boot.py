@@ -1,15 +1,29 @@
 from __future__ import annotations
 
+import json
 from fastapi import HTTPException
 from fastapi.responses import HTMLResponse
 
-from .stable_app import app, CONTROL_HTML, _paper_report, _live_report
+from .stable_app import app, CONTROL_HTML, _paper_report
+from . import fixed_app as core
 
-# stable_app owns the control surface. Remove inherited root/report routes and
-# install exactly one authoritative implementation for each.
 for route in list(app.router.routes):
     if getattr(route, "path", None) in {"/", "/api/session/report/{mode}"}:
         app.router.routes.remove(route)
+
+
+def _live_report_authoritative():
+    try:
+        state = json.loads(core.LIVE_STATE.read_text()) if core.LIVE_STATE.exists() else {}
+    except Exception:
+        state = {}
+    with core.LIVE_LOCK:
+        state["running"] = bool(core.LIVE_PROC and core.LIVE_PROC.poll() is None)
+    state["mode"] = "LIVE"
+    state.setdefault("positions", [])
+    state.setdefault("trades", [])
+    state.setdefault("orders", {})
+    return state
 
 
 @app.get("/api/session/report/{mode}")
@@ -18,7 +32,7 @@ def session_report(mode: str):
     if mode == "PAPER":
         return _paper_report()
     if mode == "LIVE":
-        return _live_report()
+        return _live_report_authoritative()
     raise HTTPException(400, "Unknown mode")
 
 
