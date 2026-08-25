@@ -14,6 +14,7 @@ from .paper_api_v3_patch import install as _install_paper_api_v3
 from .ui_pair_fix_patch import install as _install_ui_pair_fix
 from .multi_slot_backend_patch import install as _install_multi_slot
 from .final_ui_patch import install as _install_final_ui
+from .final_ui_v13_patch import install as _install_final_ui_v13
 
 _install_paper_mode(app)
 _install_allocation_fix(app)
@@ -26,3 +27,4 @@ _install_paper_api_v3(app)
 _install_ui_pair_fix(app)
 _install_multi_slot(app)
 _install_final_ui(app)
+_install_final_ui_v13(app)
