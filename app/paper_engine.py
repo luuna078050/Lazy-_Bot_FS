@@ -57,11 +57,11 @@ def _tick(slot_id,symbol,timeframe,allocation,target,minp,sl,maxhold,gateway):
 
 def _loop(gateway):
     while not _stop.is_set():
-        with _lock:cfg=dict(_state['config'])
+        with _lock:cfg=dict(_state['config']); reinvest=bool(cfg.get('reinvest_profit',False)); base=float(_state['balance'] if reinvest else cfg.get('initial_balance',0) or 0)
         for i,s in enumerate(cfg.get('pairs',[])):
             if _stop.is_set():break
             tf=cfg.get('timeframes',[])[i] if i<len(cfg.get('timeframes',[])) else '3m'; slot_id=f'{i}:{s}:{tf}'
-            a=cfg['initial_balance']*cfg['allocations'][i]/100 if i<len(cfg['allocations']) else 0; _tick(slot_id,s,tf,a,cfg['target_usdt'],cfg['min_usdt'],cfg['sl_pct'],cfg['max_hold'],gateway)
+            a=base*cfg['allocations'][i]/100 if i<len(cfg['allocations']) else 0; _tick(slot_id,s,tf,a,cfg['target_usdt'],cfg['min_usdt'],cfg['sl_pct'],cfg['max_hold'],gateway)
         time.sleep(5)
     with _lock:_state['running']=False;_state['stopped_at']=_now()
 
@@ -74,7 +74,7 @@ def start_paper(config,gateway):
     if len(alloc)!=len(pairs) or any(x<0 or x>100 for x in alloc) or abs(sum(alloc)-100)>.01:raise ValueError('Распределение по парам должно быть от 0 до 100% и дать ровно 100%.')
     if capital<=0:raise ValueError('Бюджет PAPER должен быть больше 0 USDT.')
     with _lock:
-        _stop.clear(); _state.update({'running':True,'mode':'paper','started_at':_now(),'stopped_at':None,'initial_balance':capital,'balance':capital,'pnl':0.0,'trades':[],'open_positions':{},'orders':{},'error':None,'stop_type':None,'config':{'pairs':pairs,'allocations':alloc,'timeframes':tfs,'initial_balance':capital,'target_usdt':float(config.get('target_usdt',.30)),'min_usdt':float(config.get('min_usdt',.20)),'sl_pct':float(config.get('sl_pct',.5)),'max_hold':int(config.get('max_hold',180)),'fee_pct':float(config.get('fee_pct',.1)),'risk_mode':config.get('risk_mode','NORMAL')}})
+        _stop.clear(); _state.update({'running':True,'mode':'paper','started_at':_now(),'stopped_at':None,'initial_balance':capital,'balance':capital,'pnl':0.0,'trades':[],'open_positions':{},'orders':{},'error':None,'stop_type':None,'config':{'pairs':pairs,'allocations':alloc,'timeframes':tfs,'initial_balance':capital,'reinvest_profit':bool(config.get('reinvest_profit',False)),'target_usdt':float(config.get('target_usdt',.30)),'min_usdt':float(config.get('min_usdt',.20)),'sl_pct':float(config.get('sl_pct',.5)),'max_hold':int(config.get('max_hold',180)),'fee_pct':float(config.get('fee_pct',.1)),'risk_mode':config.get('risk_mode','NORMAL')}})
     _thread=threading.Thread(target=_loop,args=(gateway,),daemon=True);_thread.start();return snapshot()
 
 def stop_paper(gateway):
