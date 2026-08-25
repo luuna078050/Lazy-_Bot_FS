@@ -133,13 +133,17 @@ def loop() -> None:
 
 def start_paper(config: dict[str, Any], gateway_unused=None):
     global THREAD, HALT_ENTRIES
-    pairs = [str(x).strip().upper().replace("-", "/") for x in config.get("pairs", []) if str(x).strip()]; allocations = [float(x) for x in config.get("allocations", [])]; capital = float(config.get("capital", 0))
+    pairs = [str(x).strip().upper().replace("-", "/") for x in config.get("pairs", []) if str(x).strip()]
+    allocations = [float(x) for x in config.get("allocations", [])]
+    capital = float(config.get("capital", 0))
+    total = sum(allocations)
     if not 1 <= len(pairs) <= 5: raise ValueError("Выберите от 1 до 5 пар.")
-    if len(allocations) != len(pairs) or any(x <= 0 for x in allocations) or abs(sum(allocations) - 100) > 0.01: raise ValueError("Доли выбранных пар должны дать ровно 100%.")
+    if len(allocations) != len(pairs) or any(x <= 0 for x in allocations) or total <= 0 or total > 100.0001:
+        raise ValueError("Доли должны быть больше 0% и в сумме не превышать 100%.")
     if capital <= 0: raise ValueError("Бюджет PAPER должен быть больше 0 USDT.")
     RADAR.start(); STOP.clear(); HALT_ENTRIES = False; COOLDOWN.clear()
     with LOCK:
-        STATE.update({"running": True, "mode": "paper", "started_at": now(), "stopped_at": None, "initial_balance": capital, "account_balance_usdt": capital, "free_usdt": capital, "realized_pnl": 0.0, "profit_reserve_usdt": 0.0, "assets": {}, "open_positions": {}, "orders": {}, "order_history": [], "trades": [], "error": None, "stop_type": None, "config": {"pairs": pairs, "allocations": allocations, "initial_balance": capital, "min_profit_usdt": float(config.get("min_profit_usdt", 0.05)), "target_profit_usdt": float(config.get("target_profit_usdt", 0.10)), "fee_pct": float(config.get("fee_pct", 0.10)), "timeframe": "3m", "risk_mode": "PROFIT_FIRST", "target_win_rate": 70.0}})
+        STATE.update({"running": True, "mode": "paper", "started_at": now(), "stopped_at": None, "initial_balance": capital, "account_balance_usdt": capital, "free_usdt": capital, "realized_pnl": 0.0, "profit_reserve_usdt": 0.0, "assets": {}, "open_positions": {}, "orders": {}, "order_history": [], "trades": [], "error": None, "stop_type": None, "config": {"pairs": pairs, "allocations": allocations, "allocated_pct": total, "unused_capital_pct": 100.0-total, "initial_balance": capital, "min_profit_usdt": float(config.get("min_profit_usdt", 0.05)), "target_profit_usdt": float(config.get("target_profit_usdt", 0.10)), "fee_pct": float(config.get("fee_pct", 0.10)), "timeframe": "3m", "risk_mode": "PROFIT_FIRST", "target_win_rate": 70.0}})
     THREAD = threading.Thread(target=loop, daemon=True, name="fast-scalper-profit-first-paper"); THREAD.start(); return snapshot()
 
 
