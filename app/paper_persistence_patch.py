@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import threading
-import time
 
 from . import profit_first_engine_v3 as base
 
@@ -58,8 +57,6 @@ def restore():
                         'order_history','trades','config','error','stop_type','pnl_window'):
                 if key in d:
                     base.STATE[key] = d[key]
-            # A clean stop remains stopped. A process restart after an active
-            # PAPER session is resumable without discarding its open positions.
             base.STATE['running'] = bool(d.get('running', False))
         return bool(d.get('running', False))
     except Exception as exc:
@@ -74,6 +71,10 @@ def start_existing():
         return base.snapshot()
     if not base.STATE.get('running'):
         return base.snapshot()
+    # The v4 engine is the active PAPER engine. On a process restart no
+    # start_paper() call occurs, so explicitly restore its tick implementation.
+    from .profit_first_engine_v4 import tick as active_tick
+    base.tick = active_tick
     base.RADAR.start()
     base.STOP.clear()
     base.HALT_ENTRIES = False
@@ -83,8 +84,6 @@ def start_existing():
 
 
 def install():
-    # Load before the first API call. The active engine remains the source of
-    # truth; this layer only checkpoints/restores it.
     resumed = restore()
 
     original_start = base.start_paper
@@ -119,8 +118,6 @@ def install():
     base.emergency_stop_paper = emergency
     base.close_position = close
 
-    # Persist newly opened positions immediately, so a browser refresh or
-    # process restart never forgets an already accepted PAPER position.
     original_tick = base.tick
     def tick(sym, allocation, tf):
         before = set(base.STATE.get('open_positions', {}).keys())
