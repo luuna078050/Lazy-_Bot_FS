@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import HTTPException
 from .fixed_app import app
 from . import fixed_app as core
-from .paper_engine_v2 import snapshot as paper_snapshot
+from .profit_first_engine import snapshot as paper_snapshot
 from .market_radar import RADAR
 
 
@@ -42,7 +42,11 @@ def _paper_report() -> dict[str, Any]:
         'orders': list((s.get('orders') or {}).values()),
         'order_history': (s.get('order_history') or [])[-30:],
         'trades': (s.get('trades') or [])[-50:], 'config': s.get('config') or {},
-        'stop_type': s.get('stop_type'), 'error': s.get('error')
+        'stop_type': s.get('stop_type'), 'error': s.get('error'),
+        'win_rate': float(s.get('win_rate', 0) or 0),
+        'closed_trades': int(s.get('closed_trades', 0) or 0),
+        'target_win_rate': float(s.get('target_win_rate', 70) or 70),
+        'adaptive_quality_threshold': float(s.get('adaptive_quality_threshold', 58) or 58),
     }
 
 
@@ -61,8 +65,6 @@ def _live_report() -> dict[str, Any]:
     equity=free+sum(float(x['market_value']) for x in positions)
     realized=float(state.get('realized_pnl') or 0)
     running=bool(core.LIVE_PROC and core.LIVE_PROC.poll() is None)
-    # For LIVE, equity is the best available current account value exposed by the
-    # runner. The bot balance remains the user-assigned capital limit.
     return {'mode':'LIVE','running':running,'started_at':state.get('started_at'),'stopped_at':state.get('stopped_at'),
             'initial_balance':bot,'account_balance_usdt':equity,'bot_balance_usdt':bot,'free_usdt':free,
             'equity_usdt':equity,'realized_pnl':realized,'unrealized_pnl':equity-bot-realized,'net_pnl':equity-bot,
