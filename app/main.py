@@ -17,6 +17,7 @@ from .final_ui_patch import install as _install_final_ui
 from .final_ui_v13_patch import install as _install_final_ui_v13
 from .reinvest_ui_patch import install as _install_reinvest_ui
 from .reinvest_engine_patch import install as _install_reinvest_engine
+from .recent_ui_patch import install as _install_recent_ui
 
 _install_paper_mode(app)
 _install_allocation_fix(app)
@@ -32,3 +33,4 @@ _install_reinvest_engine()
 _install_final_ui(app)
 _install_final_ui_v13(app)
 _install_reinvest_ui(app)
+_install_recent_ui(app)
