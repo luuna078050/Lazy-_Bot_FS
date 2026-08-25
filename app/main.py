@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-# Fast Scalper must stay live continuously. Do not suppress the MarketRadar
-# startup thread: it owns the persistent Binance WebSocket feed and reconnects
-# automatically when the connection drops.
-from .ui_v9 import app
+# Fast Scalper stays live continuously. MarketRadar owns the persistent
+# Binance public WebSocket feed and reconnects automatically.
+from .ui_v10 import app
 from .paper_mode_patch import install as _install_paper_mode
 from .allocation_fix_patch import install as _install_allocation_fix
 from .report_v6_patch import install as _install_report_v6
