@@ -1,5 +1,4 @@
 from __future__ import annotations
 
-# Single authoritative Fast Scalper application.
-# The previous UI/timer patch stack is intentionally not imported here.
-from .stable_app import app
+# One authoritative application. No stacked UI/timer patch installers.
+from .stable_boot import app
