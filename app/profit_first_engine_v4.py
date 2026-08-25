@@ -3,9 +3,7 @@ import time
 from . import profit_first_engine_v3 as base
 from .market_radar import RADAR
 
-# Test baseline: 25 USDT position.
-# Exit economics scale linearly with the actual position size.
-TEST_STAKE_USDT=25.0
+TEST_STAKE_USDT=50.0
 IDEAL_PNL_PER_MIN=0.30
 ACCEPTABLE_PNL_PER_MIN=0.23
 FLOOR_PNL_PER_MIN=0.15
@@ -22,9 +20,10 @@ def _projected_exit(entry:float,allocation:float,analysis:dict):
     wall=analysis.get('wall') or {};tf=analysis.get('tf') or {};ch3=float((tf.get('3m') or {}).get('change_pct',0));ch5=float((tf.get('5m') or {}).get('change_pct',0));pressure=max(-0.004,min(0.006,(ch3*.45+ch5*.25)/100+float(wall.get('score',0))*.002));exit_price=entry*(1+max(.0008,pressure));ideal,acceptable,floor=_range(allocation,1);return exit_price,ideal,acceptable,floor
 
 def _open_position(symbol,allocation,timeframe,analysis):
-    price=float(analysis['price']);amount=allocation/price;exit_price,ideal,acceptable,floor=_projected_exit(price,allocation,analysis);base.STATE['free_usdt']-=allocation
+    price=float(analysis['price']);amount=allocation/price;exit_price,ideal,acceptable,floor=_projected_exit(price,allocation,analysis)
+    base.STATE['free_usdt']-=allocation
     base.STATE['open_positions'][symbol]={'symbol':symbol,'entry_price':price,'amount':amount,'allocated_usdt':allocation,'opened_at':base.now(),'opened_ts':time.time(),'fee_pct':float(base.STATE['config'].get('fee_pct',.10)),'signal':'WALL_CONFIRMED' if (analysis.get('wall') or {}).get('direction')=='bullish' else 'MATRIX_CONFIRMED','timeframe':timeframe,'hold_seconds':{'1m':60,'3m':180,'5m':300}.get(timeframe,180),'max_hold_seconds':{'1m':60,'3m':180,'5m':300}.get(timeframe,180),'target_price':exit_price,'ideal_pnl_per_min':ideal,'acceptable_pnl_per_min':acceptable,'floor_pnl_per_min':floor,'wall_direction':(analysis.get('wall') or {}).get('direction'),'wall_score':(analysis.get('wall') or {}).get('score',0),'matrix':analysis.get('matrix',analysis.get('tf',{})),'quality':analysis.get('score',0),'stage':'OPEN','management':'DYNAMIC_REPRICE'}
-    base.STATE['order_history'].append({'symbol':symbol,'side':'BUY','status':'FILLED','price':price,'cost':allocation,'type':'PAPER_LIMIT','reason':'WALL_MATRIX_ENTRY','time':base.now()})
+    base.STATE['order_history'].append({'symbol':symbol,'side':'BUY','status':'FILLED','price':price,'cost':allocation,'type':'PAPER_MARKET','reason':'WALL_MATRIX_ENTRY','time':base.now()})
 
 def _stage_order(symbol,allocation,timeframe,analysis):
     price=float(analysis['price']);exit_price,ideal,acceptable,floor=_projected_exit(price,allocation,analysis);base.STATE['orders'][symbol]={'symbol':symbol,'side':'BUY','status':'NEW','type':'LIMIT','price':price,'requested_usdt':allocation,'created_ts':time.time(),'timeframe':timeframe,'ideal_pnl_per_min':ideal,'acceptable_pnl_per_min':acceptable,'floor_pnl_per_min':floor,'target_price':exit_price,'wall_score':(analysis.get('wall') or {}).get('score',0),'wall_direction':(analysis.get('wall') or {}).get('direction'),'matrix':analysis.get('matrix',analysis.get('tf',{})),'quality':analysis.get('score',0),'reprice_count':0,'last_reprice_ts':0}
@@ -76,13 +75,31 @@ def start_paper(config,gateway_unused=None):
     base.tick=tick
     cfg=dict(config)
     pairs=list(cfg.get('pairs') or [])
-    # The current test profile is one 25 USDT position. If the UI sends 100% for a single 50 USDT test balance, normalize it to 50%.
-    if len(pairs)==1 and 'stake_usdt' not in cfg and float(cfg.get('capital',0) or 0)>TEST_STAKE_USDT:
-        cfg['allocations']=[TEST_STAKE_USDT/float(cfg['capital'])*100.0]
-        cfg['test_stake_usdt']=TEST_STAKE_USDT
+    if len(pairs)==1 and 'stake_usdt' in cfg:
+        stake=max(0.0,float(cfg['stake_usdt']))
+        capital=max(0.0,float(cfg.get('capital',0) or 0))
+        if capital>0:cfg['allocations']=[min(100.0,stake/capital*100.0)]
     return base.start_paper(cfg,gateway_unused)
 
-def stop_paper(gateway_unused=None):return base.stop_paper(gateway_unused)
-def emergency_stop_paper(gateway_unused=None):return base.emergency_stop_paper(gateway_unused)
+def stop_paper(gateway_unused=None):
+    # Normal STOP is a clean session stop: cancel staged orders and realize all open PAPER positions.
+    with base.LOCK:
+        base.HALT_ENTRIES=True
+        base.STOP.set()
+        for sym,pos in list(base.STATE['open_positions'].items()):
+            a=_analysis(sym)
+            if a:base.close_position(sym,pos,float(a['price']),'MANUAL_STOP')
+        base.STATE['orders'].clear();base.STATE['running']=False;base.STATE['stopped_at']=base.now();base.STATE['stop_type']='STOP'
+    return base.snapshot()
+
+def emergency_stop_paper(gateway_unused=None):
+    base.HALT_ENTRIES=True;base.STOP.set()
+    with base.LOCK:
+        for sym,pos in list(base.STATE['open_positions'].items()):
+            a=_analysis(sym)
+            base.close_position(sym,pos,float(a['price']) if a else float(pos['entry_price']),'EMERGENCY_STOP')
+        base.STATE['orders'].clear();base.STATE['running']=False;base.STATE['stopped_at']=base.now();base.STATE['stop_type']='EMERGENCY_STOP'
+    return base.snapshot()
+
 def snapshot():
-    s=base.snapshot();s['strategy']={'test_stake_usdt':TEST_STAKE_USDT,'ideal_pnl_per_min':IDEAL_PNL_PER_MIN,'acceptable_pnl_per_min':ACCEPTABLE_PNL_PER_MIN,'floor_pnl_per_min':FLOOR_PNL_PER_MIN,'dynamic_scaling':'linear_by_position_size','reprice_cooldown_sec':REPRICE_COOLDOWN,'entry_timeout_sec':ENTRY_MAX_WAIT,'analysis_timeframes':['1m','3m','5m','15m','30m'],'ui_timeframes':['1m','3m','5m'],'wall_logic':'LIVE_ORDERBOOK_DYNAMIC'};return s
+    s=base.snapshot();s['account_balance_usdt']=float(s.get('account_balance_usdt',s.get('initial_balance',0)));s['free_usdt']=float(s.get('free_usdt',0));s['invested_usdt']=max(0.0,s['account_balance_usdt']-s['free_usdt']);s['balance_usdt']=s['account_balance_usdt'];s['strategy']={'test_stake_usdt':TEST_STAKE_USDT,'ideal_pnl_per_min':IDEAL_PNL_PER_MIN,'acceptable_pnl_per_min':ACCEPTABLE_PNL_PER_MIN,'floor_pnl_per_min':FLOOR_PNL_PER_MIN,'dynamic_scaling':'linear_by_position_size','reprice_cooldown_sec':REPRICE_COOLDOWN,'entry_timeout_sec':ENTRY_MAX_WAIT,'analysis_timeframes':['1m','3m','5m','15m','30m'],'ui_trade_timeframes':['1m','3m','5m'],'wall_logic':'LIVE_ORDERBOOK_DYNAMIC'};return s
