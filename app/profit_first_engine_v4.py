@@ -9,6 +9,7 @@ ACCEPTABLE_PNL_PER_MIN=0.23
 FLOOR_PNL_PER_MIN=0.15
 REPRICE_COOLDOWN=5.0
 ENTRY_MAX_WAIT=20.0
+ENTRY_SCORE=48.0
 
 def _range(allocation:float,minutes:float=1.0):
     scale=max(0.0,float(allocation or 0))/TEST_STAKE_USDT
@@ -40,7 +41,7 @@ def _manage_order(symbol,order,allocation,timeframe):
     new_price=float(a['price']);old=float(order['price'])
     if now-float(order.get('last_reprice_ts',0))>=REPRICE_COOLDOWN and abs(new_price-old)/old>=.0003:
         order['price']=new_price;order['target_price']=_projected_exit(new_price,allocation,a)[0];order['reprice_count']+=1;order['last_reprice_ts']=now;base.STATE['order_history'].append({'symbol':symbol,'side':'BUY','status':'REPLACED','old_price':old,'price':new_price,'reason':'WALL_REPRICE','time':base.now()})
-    if abs(float(a['price'])-float(order['price']))/float(order['price'])<=.0005 and float(a['score'])>=52:
+    if abs(float(a['price'])-float(order['price']))/float(order['price'])<=.0005 and float(a['score'])>=ENTRY_SCORE:
         base.STATE['orders'].pop(symbol,None);_open_position(symbol,allocation,timeframe,a)
     elif now-float(order['created_ts'])>ENTRY_MAX_WAIT:
         base.STATE['orders'].pop(symbol,None);base.STATE['order_history'].append({'symbol':symbol,'side':'BUY','status':'CANCELED','price':order['price'],'reason':'ENTRY_TIMEOUT','time':base.now()})
@@ -68,7 +69,7 @@ def tick(symbol:str,allocation:float,timeframe:str):
         if pos:_manage_position(symbol,pos);return
         if order:_manage_order(symbol,order,allocation,timeframe);return
         if base.HALT_ENTRIES or base.STATE['free_usdt']<=0 or allocation<=0 or allocation>base.STATE['free_usdt']+1e-9 or time.time()<base.COOLDOWN.get(symbol,0):return
-        wall=a.get('wall') or {};tf=a.get('matrix') or a.get('tf') or {};score=float(a.get('score',0));ch3=float((tf.get('3m') or {}).get('change_pct',0));ch5=float((tf.get('5m') or {}).get('change_pct',0));matrix_up=sum(1 for x in ('1m','3m','5m','15m','30m') if float((tf.get(x) or {}).get('trend',0))>0);wall_ok=wall.get('direction') in {'bullish','neutral'} and float(wall.get('score',0))>=-.08;momentum_ok=ch3>=-.03 and ch5>=-.05;signal_ok=score>=52 and wall_ok and momentum_ok and (matrix_up>=2 or float(a.get('pulse',{}).get('pump_score',0))>=.45)
+        wall=a.get('wall') or {};tf=a.get('matrix') or a.get('tf') or {};score=float(a.get('score',0));ch3=float((tf.get('3m') or {}).get('change_pct',0));ch5=float((tf.get('5m') or {}).get('change_pct',0));matrix_up=sum(1 for x in ('1m','3m','5m','15m','30m') if float((tf.get(x) or {}).get('trend',0))>0);wall_ok=wall.get('direction') in {'bullish','neutral'} and float(wall.get('score',0))>=-.12;momentum_ok=ch3>=-.10 and ch5>=-.12;signal_ok=score>=ENTRY_SCORE and wall_ok and momentum_ok and (matrix_up>=1 or float(a.get('pulse',{}).get('pump_score',0))>=.35)
         if signal_ok:_stage_order(symbol,allocation,timeframe,a)
 
 def start_paper(config,gateway_unused=None):
@@ -82,7 +83,6 @@ def start_paper(config,gateway_unused=None):
     return base.start_paper(cfg,gateway_unused)
 
 def stop_paper(gateway_unused=None):
-    # Normal STOP is a clean session stop: cancel staged orders and realize all open PAPER positions.
     with base.LOCK:
         base.HALT_ENTRIES=True
         base.STOP.set()
@@ -102,4 +102,4 @@ def emergency_stop_paper(gateway_unused=None):
     return base.snapshot()
 
 def snapshot():
-    s=base.snapshot();s['account_balance_usdt']=float(s.get('account_balance_usdt',s.get('initial_balance',0)));s['free_usdt']=float(s.get('free_usdt',0));s['invested_usdt']=max(0.0,s['account_balance_usdt']-s['free_usdt']);s['balance_usdt']=s['account_balance_usdt'];s['strategy']={'test_stake_usdt':TEST_STAKE_USDT,'ideal_pnl_per_min':IDEAL_PNL_PER_MIN,'acceptable_pnl_per_min':ACCEPTABLE_PNL_PER_MIN,'floor_pnl_per_min':FLOOR_PNL_PER_MIN,'dynamic_scaling':'linear_by_position_size','reprice_cooldown_sec':REPRICE_COOLDOWN,'entry_timeout_sec':ENTRY_MAX_WAIT,'analysis_timeframes':['1m','3m','5m','15m','30m'],'ui_trade_timeframes':['1m','3m','5m'],'wall_logic':'LIVE_ORDERBOOK_DYNAMIC'};return s
+    s=base.snapshot();s['account_balance_usdt']=float(s.get('account_balance_usdt',s.get('initial_balance',0)));s['free_usdt']=float(s.get('free_usdt',0));s['invested_usdt']=max(0.0,s['account_balance_usdt']-s['free_usdt']);s['balance_usdt']=s['account_balance_usdt'];s['strategy']={'test_stake_usdt':TEST_STAKE_USDT,'ideal_pnl_per_min':IDEAL_PNL_PER_MIN,'acceptable_pnl_per_min':ACCEPTABLE_PNL_PER_MIN,'floor_pnl_per_min':FLOOR_PNL_PER_MIN,'entry_score':ENTRY_SCORE,'dynamic_scaling':'linear_by_position_size','reprice_cooldown_sec':REPRICE_COOLDOWN,'entry_timeout_sec':ENTRY_MAX_WAIT,'analysis_timeframes':['1m','3m','5m','15m','30m'],'ui_trade_timeframes':['1m','3m','5m'],'wall_logic':'LIVE_ORDERBOOK_DYNAMIC'};return s
