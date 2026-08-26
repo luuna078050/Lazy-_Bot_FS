@@ -19,6 +19,7 @@ from .reinvest_ui_patch import install as _install_reinvest_ui
 from .reinvest_engine_patch import install as _install_reinvest_engine
 from .recent_ui_patch import install as _install_recent_ui
 from .test_start_repair_patch import install as _install_test_start_repair
+from .paper_stability_patch import install as _install_paper_stability
 
 _install_paper_mode(app)
 _install_allocation_fix(app)
@@ -36,3 +37,4 @@ _install_final_ui_v13(app)
 _install_reinvest_ui(app)
 _install_recent_ui(app)
 _install_test_start_repair(app)
+_install_paper_stability()
