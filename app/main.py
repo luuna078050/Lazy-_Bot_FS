@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # Fast Scalper stays live continuously. MarketRadar owns the persistent
 # Binance public WebSocket feed and reconnects automatically.
+from fastapi.responses import RedirectResponse
 from .ui_v10 import app
 from .paper_mode_patch import install as _install_paper_mode
 from .allocation_fix_patch import install as _install_allocation_fix
@@ -38,3 +39,9 @@ _install_reinvest_ui(app)
 _install_recent_ui(app)
 _install_test_start_repair(app)
 _install_paper_stability()
+
+# Both URLs are valid for the test build; the canonical UI remains '/'.
+@app.get('/fast-scalper')
+@app.get('/fast-scalper/')
+def fast_scalper_alias():
+    return RedirectResponse(url='/', status_code=307)
