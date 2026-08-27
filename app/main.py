@@ -4,6 +4,10 @@ from __future__ import annotations
 from .stable_app import app, CONTROL_HTML
 from fastapi.responses import HTMLResponse
 
+# New UI state namespace intentionally resets stale browser-local pair selections
+# from previous builds. Existing selections must never survive a fresh deployment.
+CONTROL_HTML = CONTROL_HTML.replace('fsStableSlotsV1', 'fsStableSlotsV2').replace('fsStableRankingV1', 'fsStableRankingV2')
+
 # stable_app historically appended a lightweight route-like object. Starlette
 # requires real BaseRoute/APIRoute objects, so replace that compatibility shim
 # with a native FastAPI route before requests arrive.
