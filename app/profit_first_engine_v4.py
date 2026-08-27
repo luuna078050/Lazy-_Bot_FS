@@ -1,105 +1,184 @@
 from __future__ import annotations
 import time
+import threading
 from . import profit_first_engine_v3 as base
 from .market_radar import RADAR
 
-TEST_STAKE_USDT=50.0
-IDEAL_PNL_PER_MIN=0.30
-ACCEPTABLE_PNL_PER_MIN=0.23
-FLOOR_PNL_PER_MIN=0.15
-REPRICE_COOLDOWN=5.0
-ENTRY_MAX_WAIT=20.0
-ENTRY_SCORE=48.0
+ENTRY_SCORE = 45.0
 
-def _range(allocation:float,minutes:float=1.0):
-    scale=max(0.0,float(allocation or 0))/TEST_STAKE_USDT
-    return IDEAL_PNL_PER_MIN*scale*minutes,ACCEPTABLE_PNL_PER_MIN*scale*minutes,FLOOR_PNL_PER_MIN*scale*minutes
 
-def _analysis(symbol):return RADAR.symbol_analysis(symbol.replace('/',''))
+def _analysis(symbol):
+    try:
+        return RADAR.analyze(symbol.replace('/', '').upper())
+    except Exception:
+        return None
 
-def _projected_exit(entry:float,allocation:float,analysis:dict):
-    wall=analysis.get('wall') or {};tf=analysis.get('tf') or {};ch3=float((tf.get('3m') or {}).get('change_pct',0));ch5=float((tf.get('5m') or {}).get('change_pct',0));pressure=max(-0.004,min(0.006,(ch3*.45+ch5*.25)/100+float(wall.get('score',0))*.002));exit_price=entry*(1+max(.0008,pressure));ideal,acceptable,floor=_range(allocation,1);return exit_price,ideal,acceptable,floor
 
-def _open_position(symbol,allocation,timeframe,analysis):
-    price=float(analysis['price']);amount=allocation/price;exit_price,ideal,acceptable,floor=_projected_exit(price,allocation,analysis)
-    base.STATE['free_usdt']-=allocation
-    base.STATE['open_positions'][symbol]={'symbol':symbol,'entry_price':price,'amount':amount,'allocated_usdt':allocation,'opened_at':base.now(),'opened_ts':time.time(),'fee_pct':float(base.STATE['config'].get('fee_pct',.10)),'signal':'WALL_CONFIRMED' if (analysis.get('wall') or {}).get('direction')=='bullish' else 'MATRIX_CONFIRMED','timeframe':timeframe,'hold_seconds':{'1m':60,'3m':180,'5m':300}.get(timeframe,180),'max_hold_seconds':{'1m':60,'3m':180,'5m':300}.get(timeframe,180),'target_price':exit_price,'ideal_pnl_per_min':ideal,'acceptable_pnl_per_min':acceptable,'floor_pnl_per_min':floor,'wall_direction':(analysis.get('wall') or {}).get('direction'),'wall_score':(analysis.get('wall') or {}).get('score',0),'matrix':analysis.get('matrix',analysis.get('tf',{})),'quality':analysis.get('score',0),'stage':'OPEN','management':'DYNAMIC_REPRICE'}
-    base.STATE['order_history'].append({'symbol':symbol,'side':'BUY','status':'FILLED','price':price,'cost':allocation,'type':'PAPER_MARKET','reason':'WALL_MATRIX_ENTRY','time':base.now()})
+def _horizon(tf):
+    return {'1m': 60, '3m': 180, '5m': 300}.get(tf, 180)
 
-def _stage_order(symbol,allocation,timeframe,analysis):
-    price=float(analysis['price']);exit_price,ideal,acceptable,floor=_projected_exit(price,allocation,analysis);base.STATE['orders'][symbol]={'symbol':symbol,'side':'BUY','status':'NEW','type':'LIMIT','price':price,'requested_usdt':allocation,'created_ts':time.time(),'timeframe':timeframe,'ideal_pnl_per_min':ideal,'acceptable_pnl_per_min':acceptable,'floor_pnl_per_min':floor,'target_price':exit_price,'wall_score':(analysis.get('wall') or {}).get('score',0),'wall_direction':(analysis.get('wall') or {}).get('direction'),'matrix':analysis.get('matrix',analysis.get('tf',{})),'quality':analysis.get('score',0),'reprice_count':0,'last_reprice_ts':0}
-    base.STATE['order_history'].append({'symbol':symbol,'side':'BUY','status':'NEW','price':price,'cost':allocation,'type':'PAPER_LIMIT','reason':'WALL_MATRIX_SETUP','time':base.now()})
 
-def _manage_order(symbol,order,allocation,timeframe):
-    a=_analysis(symbol)
-    if not a:return
-    now=time.time();wall=a.get('wall') or {};projected=float(a.get('projected_pnl_per_min_100',0))*allocation/100
-    if wall.get('direction')=='bearish' and float(wall.get('score',0))<-.12:
-        base.STATE['orders'].pop(symbol,None);base.STATE['order_history'].append({'symbol':symbol,'side':'BUY','status':'CANCELED','price':order['price'],'reason':'WALL_DIRECTION_CHANGED','time':base.now()});return
-    if projected<float(order['floor_pnl_per_min']) and now-float(order['created_ts'])>=5:
-        base.STATE['orders'].pop(symbol,None);base.STATE['order_history'].append({'symbol':symbol,'side':'BUY','status':'CANCELED','price':order['price'],'reason':'EXPECTED_RETURN_BELOW_FLOOR','time':base.now()});return
-    new_price=float(a['price']);old=float(order['price'])
-    if now-float(order.get('last_reprice_ts',0))>=REPRICE_COOLDOWN and abs(new_price-old)/old>=.0003:
-        order['price']=new_price;order['target_price']=_projected_exit(new_price,allocation,a)[0];order['reprice_count']+=1;order['last_reprice_ts']=now;base.STATE['order_history'].append({'symbol':symbol,'side':'BUY','status':'REPLACED','old_price':old,'price':new_price,'reason':'WALL_REPRICE','time':base.now()})
-    if abs(float(a['price'])-float(order['price']))/float(order['price'])<=.0005 and float(a['score'])>=ENTRY_SCORE:
-        base.STATE['orders'].pop(symbol,None);_open_position(symbol,allocation,timeframe,a)
-    elif now-float(order['created_ts'])>ENTRY_MAX_WAIT:
-        base.STATE['orders'].pop(symbol,None);base.STATE['order_history'].append({'symbol':symbol,'side':'BUY','status':'CANCELED','price':order['price'],'reason':'ENTRY_TIMEOUT','time':base.now()})
+def _pnl(cap, entry, last, fee_pct):
+    qty = cap / entry if entry else 0.0
+    gross = (last - entry) * qty
+    fee = (cap + last * qty) * fee_pct / 100.0
+    return gross - fee, gross, fee
 
-def _manage_position(symbol,pos):
-    a=_analysis(symbol)
-    if not a:return
-    last=float(a['price']);fee=float(pos.get('fee_pct',.1));net,_,_=base.pnl(float(pos['allocated_usdt']),float(pos['entry_price']),last,fee);age=time.time()-float(pos['opened_ts']);wall=a.get('wall') or {};projected=float(a.get('projected_pnl_per_min_100',0))*float(pos['allocated_usdt'])/100;ideal=float(pos['ideal_pnl_per_min']);acceptable=float(pos['acceptable_pnl_per_min']);floor=float(pos['floor_pnl_per_min']);reason=None
-    if wall.get('direction')=='bearish' and float(wall.get('score',0))<-.12 and net>0:reason='WALL_REVERSAL_PROFIT'
-    elif net>=ideal and projected>=acceptable:reason='IDEAL_RANGE'
-    elif net>=acceptable and projected<acceptable:reason='ACCEPTABLE_RANGE'
-    elif net>0 and projected<floor:reason='FLOOR_PROTECTION'
-    elif net>0 and age>=float(pos['max_hold_seconds']):reason='TIME_EXIT'
-    elif net<0 and age>=float(pos['max_hold_seconds']):reason='HYPOTHESIS_FAILED'
-    elif (last/float(pos['entry_price'])-1)*100<=-1.20:reason='CATASTROPHIC_STOP'
-    if reason:base.close_position(symbol,pos,last,reason)
-    else:
-        pos['current_price']=last;pos['unrealized_pnl']=net;pos['projected_pnl_per_min']=projected;pos['wall_direction']=wall.get('direction');pos['wall_score']=wall.get('score',0);pos['matrix']=a.get('matrix',a.get('tf',{}));pos['age_sec']=age
 
-def tick(symbol:str,allocation:float,timeframe:str):
-    a=_analysis(symbol)
-    if not a:return
+def _close(key, pos, last, reason):
+    cap = float(pos['allocated_usdt'])
+    net, gross, fee = _pnl(cap, float(pos['entry_price']), last, float(pos.get('fee_pct', .10)))
+    base.STATE['free_usdt'] += cap
+    base.STATE['account_balance_usdt'] += net
+    base.STATE['realized_pnl'] += net
+    if net > 0:
+        base.STATE['profit_reserve_usdt'] += net
+    base.STATE['trades'].append({'symbol': pos['symbol'], 'side': 'SELL', 'entry_price': pos['entry_price'], 'exit_price': last, 'allocated_usdt': cap, 'gross_pnl': gross, 'fee': fee, 'net_pnl': net, 'reason': reason, 'opened_at': pos['opened_at'], 'closed_at': base.now(), 'timeframe': pos['timeframe']})
+    base.STATE['pnl_window'].append({'ts': time.time(), 'pnl': net})
+    base.STATE['order_history'].append({'symbol': pos['symbol'], 'side': 'SELL', 'status': 'FILLED', 'price': last, 'net_pnl': net, 'reason': reason, 'time': base.now()})
+    base.STATE['open_positions'].pop(key, None)
+    base.STATE['orders'].pop(key, None)
+    base.COOLDOWN[pos['symbol']] = time.time() + 5.0
+
+
+def _open(key, symbol, allocation, timeframe, a):
+    price = float(a['price'])
+    fee = float(base.STATE['config'].get('fee_pct', .10))
+    horizon = _horizon(timeframe)
+    target = max(0.03, allocation * 0.0025)
+    base.STATE['free_usdt'] -= allocation
+    base.STATE['open_positions'][key] = {'symbol': symbol, 'entry_price': price, 'amount': allocation / price, 'allocated_usdt': allocation, 'opened_at': base.now(), 'opened_ts': time.time(), 'fee_pct': fee, 'signal': 'PAPER_CONFIRMED', 'timeframe': timeframe, 'hold_seconds': horizon, 'max_hold_seconds': horizon, 'target_profit_usdt': target, 'quality': float(a.get('score', 0)), 'entry_threshold': ENTRY_SCORE, 'stage': 'OPEN', 'last_analysis': a}
+    base.STATE['order_history'].append({'symbol': symbol, 'side': 'BUY', 'status': 'FILLED', 'price': price, 'cost': allocation, 'type': 'PAPER_MARKET', 'reason': 'PAPER_SIGNAL_CONFIRMED', 'time': base.now()})
+
+
+def _manage(key, pos):
+    a = _analysis(pos['symbol'])
+    if not a:
+        return
+    last = float(a['price'])
+    net, _, _ = _pnl(float(pos['allocated_usdt']), float(pos['entry_price']), last, float(pos.get('fee_pct', .10)))
+    age = time.time() - float(pos['opened_ts'])
+    wall = a.get('wall') or {}
+    reason = None
+    if net >= float(pos['target_profit_usdt']):
+        reason = 'TARGET_PROFIT'
+    elif wall.get('direction') == 'bearish' and net > 0:
+        reason = 'WALL_REVERSAL_PROFIT'
+    elif age >= float(pos['max_hold_seconds']):
+        reason = 'TIME_EXIT' if net >= 0 else 'HYPOTHESIS_FAILED'
+    elif (last / float(pos['entry_price']) - 1.0) * 100 <= -1.20:
+        reason = 'CATASTROPHIC_STOP'
+    if reason:
+        _close(key, pos, last, reason)
+        return
+    pos['current_price'] = last
+    pos['unrealized_pnl'] = net
+    pos['age_sec'] = age
+    pos['quality'] = float(a.get('score', 0))
+    pos['last_analysis'] = a
+
+
+def tick(symbol: str, allocation: float, timeframe: str):
+    try:
+        base.STATE.setdefault('diagnostics', {'ticks': 0, 'entries': 0, 'errors': 0, 'last_tick_ts': None, 'last_reason': '', 'last_error': None})
+        base.STATE['diagnostics']['ticks'] += 1
+        base.STATE['diagnostics']['last_tick_ts'] = time.time()
+        a = _analysis(symbol)
+        if not a:
+            base.STATE['diagnostics']['last_reason'] = f'{symbol}: waiting for Binance market data'
+            return
+        key = f'{symbol}::{timeframe}'
+        with base.LOCK:
+            pos = base.STATE['open_positions'].get(key)
+            if pos:
+                _manage(key, pos)
+                return
+            if base.HALT_ENTRIES or base.STATE['free_usdt'] + 1e-9 < allocation:
+                base.STATE['diagnostics']['last_reason'] = f'{symbol}: insufficient free capital or entries halted'
+                return
+            wall = a.get('wall') or {}
+            score = float(a.get('score', 0) or 0)
+            if score < ENTRY_SCORE or wall.get('direction') == 'bearish':
+                base.STATE['diagnostics']['last_reason'] = f'{symbol}: no entry score={score:.1f} wall={wall.get("direction", "neutral")}'
+                return
+            _open(key, symbol, allocation, timeframe, a)
+            base.STATE['diagnostics']['entries'] += 1
+            base.STATE['diagnostics']['last_reason'] = f'{symbol}: PAPER BUY filled at {a["price"]}'
+    except Exception as exc:
+        base.STATE.setdefault('diagnostics', {})['errors'] = int(base.STATE.get('diagnostics', {}).get('errors', 0)) + 1
+        base.STATE['diagnostics']['last_error'] = str(exc)[:300]
+
+
+def start_paper(config, gateway_unused=None):
+    cfg = dict(config)
+    pairs = [str(x).strip().upper().replace('-', '/') for x in cfg.get('pairs', []) if str(x).strip()]
+    alloc = [float(x) for x in cfg.get('allocations', [])]
+    tfs = [str(x).lower() for x in cfg.get('timeframes', [])]
+    capital = float(cfg.get('capital', 0) or 0)
+    if not 1 <= len(pairs) <= 10:
+        raise ValueError('Выберите от 1 до 10 пар.')
+    if len(alloc) != len(pairs) or any(x <= 0 for x in alloc) or not 0 < sum(alloc) <= 100.0001:
+        raise ValueError('Доли должны быть больше 0% и в сумме не превышать 100%.')
+    if capital <= 0:
+        raise ValueError('Бюджет PAPER должен быть больше 0 USDT.')
+    if not tfs:
+        tfs = [str(cfg.get('timeframe', '3m')).lower()] * len(pairs)
+    if len(tfs) != len(pairs) or any(x not in {'1m', '3m', '5m'} for x in tfs):
+        raise ValueError('Допустимые таймфреймы: 1m, 3m, 5m.')
+    base.tick = tick
+    RADAR.start()
+    base.STOP.clear(); base.HALT_ENTRIES = False; base.COOLDOWN.clear()
     with base.LOCK:
-        pos=base.STATE['open_positions'].get(symbol);order=base.STATE['orders'].get(symbol)
-        if pos:_manage_position(symbol,pos);return
-        if order:_manage_order(symbol,order,allocation,timeframe);return
-        if base.HALT_ENTRIES or base.STATE['free_usdt']<=0 or allocation<=0 or allocation>base.STATE['free_usdt']+1e-9 or time.time()<base.COOLDOWN.get(symbol,0):return
-        wall=a.get('wall') or {};tf=a.get('matrix') or a.get('tf') or {};score=float(a.get('score',0));ch3=float((tf.get('3m') or {}).get('change_pct',0));ch5=float((tf.get('5m') or {}).get('change_pct',0));matrix_up=sum(1 for x in ('1m','3m','5m','15m','30m') if float((tf.get(x) or {}).get('trend',0))>0);wall_ok=wall.get('direction') in {'bullish','neutral'} and float(wall.get('score',0))>=-.12;momentum_ok=ch3>=-.10 and ch5>=-.12;signal_ok=score>=ENTRY_SCORE and wall_ok and momentum_ok and (matrix_up>=1 or float(a.get('pulse',{}).get('pump_score',0))>=.35)
-        if signal_ok:_stage_order(symbol,allocation,timeframe,a)
+        base.STATE.update({'running': True, 'mode': 'paper', 'started_at': base.now(), 'stopped_at': None, 'initial_balance': capital, 'account_balance_usdt': capital, 'free_usdt': capital, 'realized_pnl': 0.0, 'profit_reserve_usdt': 0.0, 'assets': {}, 'open_positions': {}, 'orders': {}, 'order_history': [], 'trades': [], 'error': None, 'stop_type': None, 'pnl_window': [], 'diagnostics': {'ticks': 0, 'entries': 0, 'errors': 0, 'last_tick_ts': None, 'last_reason': 'starting Binance market feed', 'last_error': None}, 'config': {'pairs': pairs, 'allocations': alloc, 'allocated_pct': sum(alloc), 'unused_capital_pct': 100 - sum(alloc), 'initial_balance': capital, 'fee_pct': float(cfg.get('fee_pct', .10)), 'timeframes': tfs, 'risk_mode': 'PROFIT_FIRST', 'target_win_rate': 70.0}})
+    def loop():
+        while not base.STOP.is_set():
+            try:
+                with base.LOCK:
+                    c = dict(base.STATE['config'])
+                for i, sym in enumerate(c['pairs']):
+                    tick(sym, float(c['initial_balance']) * float(c['allocations'][i]) / 100.0, c['timeframes'][i])
+            except Exception as exc:
+                with base.LOCK:
+                    base.STATE['error'] = str(exc)[:300]
+                    base.STATE['diagnostics']['last_error'] = str(exc)[:300]
+            time.sleep(1)
+        with base.LOCK:
+            base.STATE['running'] = False; base.STATE['stopped_at'] = base.now()
+    base.THREAD = threading.Thread(target=loop, daemon=True, name='fast-scalper-paper')
+    base.THREAD.start()
+    return snapshot()
 
-def start_paper(config,gateway_unused=None):
-    base.tick=tick
-    cfg=dict(config)
-    pairs=list(cfg.get('pairs') or [])
-    if len(pairs)==1 and 'stake_usdt' in cfg:
-        stake=max(0.0,float(cfg['stake_usdt']))
-        capital=max(0.0,float(cfg.get('capital',0) or 0))
-        if capital>0:cfg['allocations']=[min(100.0,stake/capital*100.0)]
-    return base.start_paper(cfg,gateway_unused)
 
 def stop_paper(gateway_unused=None):
+    base.HALT_ENTRIES = True; base.STOP.set()
     with base.LOCK:
-        base.HALT_ENTRIES=True
-        base.STOP.set()
-        for sym,pos in list(base.STATE['open_positions'].items()):
-            a=_analysis(sym)
-            if a:base.close_position(sym,pos,float(a['price']),'MANUAL_STOP')
-        base.STATE['orders'].clear();base.STATE['running']=False;base.STATE['stopped_at']=base.now();base.STATE['stop_type']='STOP'
-    return base.snapshot()
+        for key, pos in list(base.STATE['open_positions'].items()):
+            a = _analysis(pos['symbol'])
+            _close(key, pos, float(a['price']) if a else float(pos['entry_price']), 'MANUAL_STOP')
+        base.STATE['orders'].clear(); base.STATE['running'] = False; base.STATE['stopped_at'] = base.now(); base.STATE['stop_type'] = 'STOP'
+    return snapshot()
+
 
 def emergency_stop_paper(gateway_unused=None):
-    base.HALT_ENTRIES=True;base.STOP.set()
+    base.HALT_ENTRIES = True; base.STOP.set()
     with base.LOCK:
-        for sym,pos in list(base.STATE['open_positions'].items()):
-            a=_analysis(sym)
-            base.close_position(sym,pos,float(a['price']) if a else float(pos['entry_price']),'EMERGENCY_STOP')
-        base.STATE['orders'].clear();base.STATE['running']=False;base.STATE['stopped_at']=base.now();base.STATE['stop_type']='EMERGENCY_STOP'
-    return base.snapshot()
+        for key, pos in list(base.STATE['open_positions'].items()):
+            a = _analysis(pos['symbol'])
+            _close(key, pos, float(a['price']) if a else float(pos['entry_price']), 'EMERGENCY_STOP')
+        base.STATE['orders'].clear(); base.STATE['running'] = False; base.STATE['stopped_at'] = base.now(); base.STATE['stop_type'] = 'EMERGENCY_STOP'
+    return snapshot()
+
 
 def snapshot():
-    s=base.snapshot();s['account_balance_usdt']=float(s.get('account_balance_usdt',s.get('initial_balance',0)));s['free_usdt']=float(s.get('free_usdt',0));s['invested_usdt']=max(0.0,s['account_balance_usdt']-s['free_usdt']);s['balance_usdt']=s['account_balance_usdt'];s['strategy']={'test_stake_usdt':TEST_STAKE_USDT,'ideal_pnl_per_min':IDEAL_PNL_PER_MIN,'acceptable_pnl_per_min':ACCEPTABLE_PNL_PER_MIN,'floor_pnl_per_min':FLOOR_PNL_PER_MIN,'entry_score':ENTRY_SCORE,'dynamic_scaling':'linear_by_position_size','reprice_cooldown_sec':REPRICE_COOLDOWN,'entry_timeout_sec':ENTRY_MAX_WAIT,'analysis_timeframes':['1m','3m','5m','15m','30m'],'ui_trade_timeframes':['1m','3m','5m'],'wall_logic':'LIVE_ORDERBOOK_DYNAMIC'};return s
+    s = base.snapshot()
+    capital = float(s.get('initial_balance', 0) or 0)
+    realized = float(s.get('realized_pnl', 0) or 0)
+    # Total account balance must not fall merely because capital is allocated to an open position.
+    s['account_balance_usdt'] = capital + realized
+    s['balance_usdt'] = capital + realized
+    s['free_usdt'] = float(s.get('free_usdt', 0) or 0)
+    s['invested_usdt'] = max(0.0, s['account_balance_usdt'] - s['free_usdt'])
+    s['bot_balance_usdt'] = capital + realized
+    s['diagnostics'] = dict(base.STATE.get('diagnostics') or {})
+    s['strategy'] = {'paper_execution': 'LIVE_BINANCE_PRICE_STREAM_SIMULATED_FILLS', 'entry_score': ENTRY_SCORE, 'timeframes': ['1m', '3m', '5m'], 'max_pairs': 10, 'duplicate_pair_different_tf': True}
+    return s
