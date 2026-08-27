@@ -23,6 +23,10 @@ def install(app):
     function bind(id,mode){
       const old=$(id); if(!old) return;
       const b=old.cloneNode(true); old.replaceWith(b);
+      // The original markup may contain an inline onclick handler.  A cloned
+      // node keeps that attribute, so explicitly remove it to guarantee one
+      // and only one start/stop path.
+      b.removeAttribute('onclick'); b.onclick=null;
       b.addEventListener('click', async function(ev){
         ev.preventDefault(); ev.stopImmediatePropagation();
         const low=mode.toLowerCase();
@@ -33,9 +37,6 @@ def install(app):
             paint(false);
           }catch(e){alert('Ошибка остановки '+mode+': '+e.message)}
           return;
-        }
-        if(typeof cfg!=='function' && typeof window.cfg!=='function'){
-          // Build a minimal payload directly from the visible slots.
         }
         let pairs=[],allocations=[],timeframes=[];
         try{
@@ -78,7 +79,7 @@ def install(app):
     }
     bind('paperSwitch','PAPER'); bind('liveSwitch','LIVE');
     const em=$('fsEmergency');
-    if(em){const b=em.cloneNode(true);em.replaceWith(b);b.addEventListener('click',async function(ev){ev.preventDefault();ev.stopImmediatePropagation();await fetch('/api/paper/emergency-stop',{method:'POST',cache:'no-store'}).catch(()=>{});await fetch('/api/live/emergency-stop',{method:'POST',cache:'no-store'}).catch(()=>{});location.reload();},true)}
+    if(em){const b=em.cloneNode(true);em.replaceWith(b);b.removeAttribute('onclick');b.onclick=null;b.addEventListener('click',async function(ev){ev.preventDefault();ev.stopImmediatePropagation();await fetch('/api/paper/emergency-stop',{method:'POST',cache:'no-store'}).catch(()=>{});await fetch('/api/live/emergency-stop',{method:'POST',cache:'no-store'}).catch(()=>{});location.reload();},true)}
   }
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>setTimeout(boot,150));else setTimeout(boot,150);
 })();
