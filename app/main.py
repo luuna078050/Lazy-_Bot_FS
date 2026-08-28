@@ -1,94 +1,109 @@
 from __future__ import annotations
-import asyncio, time, uuid
-from datetime import datetime, timezone
+import asyncio,time,uuid
+from datetime import datetime,timezone
 from typing import Any
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI,HTTPException
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
-
+from pydantic import BaseModel,Field
 app=FastAPI(title='Fast Scalper — New Start')
-BINANCE='https://api.binance.com'; MAX_SLOTS=10; DEFAULT_BALANCE=1000.0
-state={'running':False,'mode':'PAPER','balance':DEFAULT_BALANCE,'free_balance':DEFAULT_BALANCE,'realized':0.0,'trades':[],'positions':{},'orders':{},'pairs':[None]*MAX_SLOTS,'last_error':None,'started_at':None,'last_cycle':None,'cycle_count':0}
+BINANCE='https://api.binance.com'; BAL=1000.0; N=6; R=10
+S={'running':False,'balance':BAL,'free':BAL,'real':0.0,'positions':{},'trades':[],'orders':[],'pairs':[],'radar':[],'err':None,'started':None,'cycle':0,'rotation':None,'rotsec':20}
 lock=asyncio.Lock()
 def now(): return datetime.now(timezone.utc).isoformat()
-async def bj(path,params=None):
-    async with httpx.AsyncClient(timeout=8) as c:
-        r=await c.get(BINANCE+path,params=params); r.raise_for_status(); return r.json()
-async def kl(symbol,tf='1m',limit=30): return await bj('/api/v3/klines',{'symbol':symbol,'interval':tf,'limit':limit})
-def ema(v,n):
-    k=2/(n+1); x=v[0]
-    for z in v[1:]: x=z*k+x*(1-k)
-    return x
-async def analyse(symbol,tf):
-    rows=await kl(symbol,tf,30); c=[float(x[4]) for x in rows]
-    if len(c)<20:return None
-    e9,e20=ema(c,9),ema(c,20); mom=(c[-1]/c[-6]-1)*100; trend=(e9/e20-1)*100
-    score=max(0,min(100,50+trend*20+mom*8)); return {'price':c[-1],'momentum':mom,'trend':trend,'score':score,'signal':'BUY' if e9>e20 and mom>0 else 'WAIT'}
+async def api(path,params=None):
+ async with httpx.AsyncClient(timeout=8) as c:
+  r=await c.get(BINANCE+path,params=params);r.raise_for_status();return r.json()
+def ema(a,n):
+ k=2/(n+1);x=a[0]
+ for v in a[1:]:x=v*k+x*(1-k)
+ return x
+async def analyse(sym,tf):
+ rows=await api('/api/v3/klines',{'symbol':sym,'interval':tf,'limit':40});c=[float(x[4]) for x in rows]
+ if len(c)<21:return None
+ e9,e20=ema(c,9),ema(c,20);mom=(c[-1]/c[-6]-1)*100;trend=(e9/e20-1)*100;score=max(0,min(100,50+trend*18+mom*7));return {'price':c[-1],'momentum':mom,'trend':trend,'score':score,'signal':'BUY' if e9>e20 and mom>0 else 'WAIT'}
+async def make_radar():
+ t=await api('/api/v3/ticker/24hr');a=[]
+ for x in t:
+  sym=x.get('symbol','')
+  if not sym.endswith('USDT') or sym.endswith(('UPUSDT','DOWNUSDT','BULLUSDT','BEARUSDT')):continue
+  try:v=float(x['quoteVolume']);chg=float(x['priceChangePercent']);price=float(x['lastPrice'])
+  except:continue
+  if v<5e6 or price<=0:continue
+  rating=max(0,min(100,50+chg*2+min(v/1e8,20)));a.append({'symbol':sym,'price':price,'change':chg,'volume':v,'rating':round(rating,1)})
+ a.sort(key=lambda x:(x['rating'],x['volume']),reverse=True);return a[:R]
 def snap():
-    pos=[]; unreal=0
-    for p in state['positions'].values():
-        pnl=(p['current_price']/p['entry_price']-1)*p['stake']; unreal+=pnl; q=dict(p); q['unrealized_pnl']=pnl; pos.append(q)
-    return {'running':state['running'],'mode':state['mode'],'balance':state['balance'],'free_balance':state['free_balance'],'allocated':state['balance']-state['free_balance'],'realized_pnl':state['realized'],'unrealized_pnl':unreal,'net_pnl':state['realized']+unreal,'positions':pos,'orders':list(state['orders'].values()),'trades':state['trades'][:50],'pairs':state['pairs'],'last_error':state['last_error'],'last_cycle':state['last_cycle'],'cycle_count':state['cycle_count'],'started_at':state['started_at']}
-async def open_trade(symbol,tf,price,stake,score):
-    state['free_balance']-=stake; state['positions'][symbol]={'id':str(uuid.uuid4())[:8],'symbol':symbol,'timeframe':tf,'entry_price':price,'current_price':price,'stake':stake,'opened_at':now(),'score':score}; state['orders'][symbol]={'symbol':symbol,'side':'BUY','status':'FILLED','price':price,'time':now()}
-async def close_trade(symbol,price,reason):
-    p=state['positions'].pop(symbol); pnl=(price/p['entry_price']-1)*p['stake']; state['free_balance']+=p['stake']+pnl; state['realized']+=pnl; state['balance']+=pnl; state['orders'][symbol]={'symbol':symbol,'side':'SELL','status':'FILLED','price':price,'time':now()}; state['trades'].insert(0,{'id':p['id'],'symbol':symbol,'timeframe':p['timeframe'],'entry':p['entry_price'],'exit':price,'stake':p['stake'],'pnl':pnl,'reason':reason,'opened_at':p['opened_at'],'closed_at':now()}); state['trades']=state['trades'][:100]
+ pos=[];un=0
+ for p in S['positions'].values():
+  pnl=(p['current']/p['entry']-1)*p['stake'];un+=pnl;q=dict(p);q['pnl']=pnl;pos.append(q)
+ left=0
+ if S['running'] and S['rotation']:left=max(0,S['rotsec']-int(time.time()-S['rotation']))
+ return {'running':S['running'],'balance':S['balance'],'free':S['free'],'real':S['real'],'unreal':un,'net':S['real']+un,'positions':pos,'trades':S['trades'][:50],'orders':S['orders'][:20],'pairs':S['pairs'],'radar':S['radar'],'err':S['err'],'cycle':S['cycle'],'last_cycle':S.get('last_cycle'),'started':S['started'],'left':left}
+async def openp(sym,tf,price,stake,score):
+ S['free']-=stake;S['positions'][sym]={'id':str(uuid.uuid4())[:8],'symbol':sym,'timeframe':tf,'entry':price,'current':price,'stake':stake,'score':score,'opened':now()};S['orders'].insert(0,{'symbol':sym,'side':'BUY','status':'FILLED','price':price,'score':score,'time':now()})
+async def closep(sym,price,reason):
+ p=S['positions'].pop(sym);pnl=(price/p['entry']-1)*p['stake'];S['free']+=p['stake']+pnl;S['real']+=pnl;S['balance']+=pnl;S['orders'].insert(0,{'symbol':sym,'side':'SELL','status':'FILLED','price':price,'score':p['score'],'time':now(),'reason':reason});S['trades'].insert(0,{'id':p['id'],'symbol':sym,'timeframe':p['timeframe'],'entry':p['entry'],'exit':price,'stake':p['stake'],'pnl':pnl,'score':p['score'],'reason':reason,'closed':now()});S['trades']=S['trades'][:100]
+async def radar():
+ try:
+  r=await make_radar()
+  async with lock:S['radar']=r;S['err']=None
+ except Exception as e:
+  async with lock:S['err']=f'Radar: {type(e).__name__}: {e}'
 async def cycle():
-    if not state['running']: return
-    async with lock:
-        state['cycle_count']+=1; state['last_cycle']=now(); selected=[x for x in state['pairs'] if x]; state['last_error']=None
-    for item in selected:
-        try:
-            a=await analyse(item['symbol'],item['timeframe'])
-            if not a: continue
-            async with lock:
-                sym,tf=item['symbol'],item['timeframe']; p=state['positions'].get(sym)
-                if p:
-                    p['current_price']=a['price']; pnl=(a['price']/p['entry_price']-1)*p['stake']; age=time.time()-datetime.fromisoformat(p['opened_at']).timestamp()
-                    if pnl>=p['stake']*.002 or age>={'1m':90,'3m':210,'5m':330}.get(tf,210) or (a['trend']<-.03 and pnl>0): await close_trade(sym,a['price'],'TP/TIME/TREND')
-                elif state['free_balance']>=20 and a['signal']=='BUY' and a['score']>=50: await open_trade(sym,tf,a['price'],min(50,state['free_balance']),a['score'])
-        except Exception as e:
-            async with lock: state['last_error']=f"{item['symbol']}: {type(e).__name__}: {e}"
+ async with lock:
+  if not S['running']:return
+  pairs=list(S['pairs']);S['cycle']+=1;S['last_cycle']=now()
+ for x in pairs:
+  try:
+   a=await analyse(x['symbol'],x['timeframe'])
+   if not a:continue
+   async with lock:
+    p=S['positions'].get(x['symbol'])
+    if p:
+     p['current']=a['price'];pnl=(a['price']/p['entry']-1)*p['stake'];age=time.time()-datetime.fromisoformat(p['opened']).timestamp()
+     if pnl>=p['stake']*.002 or age>={'1m':90,'3m':210,'5m':330}.get(x['timeframe'],210) or (a['trend']<-.03 and pnl>0):await closep(x['symbol'],a['price'],'TP/TIME/TREND')
+    elif S['free']>=20 and a['signal']=='BUY' and a['score']>=50:await openp(x['symbol'],x['timeframe'],a['price'],min(50,S['free']),a['score'])
+  except Exception as e:
+   async with lock:S['err']=f"{x['symbol']}: {type(e).__name__}: {e}"
 async def worker():
-    while True:
-        try: await cycle()
-        except Exception as e: state['last_error']=f'engine: {e}'
-        await asyncio.sleep(5)
-async def keepalive():
-    while True: await asyncio.sleep(30)
+ while True:
+  try:
+   async with lock:run=S['running'];rot=run and (not S['rotation'] or time.time()-S['rotation']>=S['rotsec'])
+   if run:
+    if rot:await radar();async with lock:S['rotation']=time.time()
+    await cycle()
+  except Exception as e:
+   async with lock:S['err']=f'Engine: {e}'
+  await asyncio.sleep(5)
 @app.on_event('startup')
-async def startup(): asyncio.create_task(worker()); asyncio.create_task(keepalive())
-class Pair(BaseModel): symbol:str=Field(pattern=r'^[A-Z0-9]+USDT$'); timeframe:str=Field(pattern=r'^(1m|3m|5m)$')
-class PairSet(BaseModel): pairs:list[Pair]=Field(default_factory=list,max_length=10)
+async def startup():asyncio.create_task(worker())
+class Pair(BaseModel):symbol:str=Field(pattern=r'^[A-Z0-9]+USDT$');timeframe:str=Field(pattern=r'^(1m|3m|5m)$')
+class PairSet(BaseModel):pairs:list[Pair]=Field(default_factory=list,max_length=N)
 @app.get('/api/health')
-async def health(): return {'ok':True,'running':state['running'],'cycle_count':state['cycle_count'],'time':now()}
+async def health():return {'ok':True,'running':S['running'],'cycle':S['cycle'],'time':now()}
 @app.get('/api/state')
-async def api_state():
-    async with lock:return snap()
+async def state():
+ async with lock:return snap()
+@app.post('/api/radar')
+async def radar_api():await radar();async with lock:return snap()
 @app.post('/api/pairs')
-async def pairs(body:PairSet):
-    seen=set()
-    for p in body.pairs:
-        k=(p.symbol,p.timeframe)
-        if k in seen: raise HTTPException(400,'Duplicate pair + timeframe')
-        seen.add(k)
-    async with lock:
-        state['pairs']=[None]*MAX_SLOTS
-        for i,p in enumerate(body.pairs): state['pairs'][i]=p.model_dump()
-    return snap()
+async def setpairs(b:PairSet):
+ async with lock:S['pairs']=[p.model_dump() for p in b.pairs];return snap()
 @app.post('/api/paper/start')
 async def start():
-    async with lock: state['mode']='PAPER'; state['running']=True; state['started_at']=state['started_at'] or now(); state['last_error']=None
-    return snap()
+ await radar()
+ async with lock:
+  if not S['pairs']:S['pairs']=[{'symbol':x['symbol'],'timeframe':'3m'} for x in S['radar'][:N]]
+  S['running']=True;S['started']=now();S['rotation']=time.time();S['err']=None
+  return snap()
 @app.post('/api/paper/stop')
 async def stop():
-    async with lock: state['running']=False
-    return snap()
+ async with lock:S['running']=False
+ return snap()
 @app.post('/api/reset')
 async def reset():
-    async with lock: state.update({'running':False,'balance':DEFAULT_BALANCE,'free_balance':DEFAULT_BALANCE,'realized':0.0,'trades':[],'positions':{},'orders':{},'pairs':[None]*MAX_SLOTS,'last_error':None,'started_at':None,'last_cycle':None,'cycle_count':0})
-    return snap()
-HTML='''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Fast Scalper — New Start</title><style>body{font-family:Arial;background:#0b1020;color:#eef2ff;margin:0;padding:14px}.w{max-width:1100px;margin:auto}.top,.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}.top{grid-template-columns:repeat(5,1fr)}.c{background:#141b2d;border:1px solid #28334d;border-radius:12px;padding:10px;margin-top:8px}.v{font-size:19px;font-weight:700}.m{color:#8e9ab5;font-size:12px}.controls{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}.b{border:0;border-radius:10px;padding:11px;font-weight:bold;background:#26324b;color:#fff}.on{background:#087c4d}.danger{background:#9d2d3d}.slot{display:grid;grid-template-columns:1fr 75px;gap:5px}.slot input,.slot select{background:#0d1424;color:#fff;border:1px solid #2c3852;border-radius:8px;padding:8px;width:100%;box-sizing:border-box}.t{width:100%;border-collapse:collapse}.t td,.t th{padding:7px;border-bottom:1px solid #273149;font-size:12px;text-align:left}.g{color:#42e28a}.r{color:#ff6873}@media(max-width:700px){.top{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:1fr}}</style></head><body><div class="w"><h2>Fast Scalper — New Start</h2><div class="m">Clean runtime • PAPER first • empty pair selection</div><div class="top"><div class="c"><div class="m">Account Balance</div><div class="v" id="bal">—</div></div><div class="c"><div class="m">Realized PnL</div><div class="v" id="real">—</div></div><div class="c"><div class="m">Unrealized PnL</div><div class="v" id="unreal">—</div></div><div class="c"><div class="m">Net PnL</div><div class="v" id="net">—</div></div><div class="c"><div class="m">Free Balance</div><div class="v" id="free">—</div></div></div><div class="c controls"><button class="b" id="pb" onclick="paper()">PAPER OFF</button><button class="b danger" onclick="stop()">EMERGENCY STOP</button><button class="b" onclick="resetAll()">RESET</button></div><div class="c"><b>Pairs</b><div class="m">Up to 10 • same pair may be used on different timeframes.</div><div class="grid" id="slots"></div><button class="b" style="margin-top:8px" onclick="save()">SAVE PAIRS</button></div><div class="c"><b>Open Positions</b><table class="t"><tbody id="pos"></tbody></table></div><div class="c"><b>Session Result</b><div id="session" class="m">No trades yet.</div></div><div class="c"><b>Closed Trades — latest 5</b><table class="t"><tbody id="trades"></tbody></table></div><div class="c m" id="status">Engine OFF</div></div><script>const $=x=>document.getElementById(x);function build(){slots.innerHTML='';for(let i=0;i<10;i++)slots.innerHTML+=`<div class="slot"><input id="s${i}" placeholder="BTCUSDT"><select id="t${i}"><option>3m</option><option>1m</option><option>5m</option></select></div>`}build();async function j(u,o){let r=await fetch(u,o),d=await r.json();if(!r.ok)throw Error(d.detail||'request failed');return d}function money(x){return Number(x||0).toFixed(2)+' USDT'}async function paper(){render(await j('/api/paper/start',{method:'POST'}))}async function stop(){render(await j('/api/paper/stop',{method:'POST'}))}async function resetAll(){build();render(await j('/api/reset',{method:'POST'}))}async function save(){let p=[];for(let i=0;i<10;i++){let s=$('s'+i).value.trim().toUpperCase();if(s)p.push({symbol:s,timeframe:$('t'+i).value})}render(await j('/api/pairs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pairs:p})}))}function render(d){bal.textContent=money(d.balance);real.textContent=money(d.realized_pnl);unreal.textContent=money(d.unrealized_pnl);net.textContent=money(d.net_pnl);free.textContent=money(d.free_balance);pb.textContent=d.running?'PAPER ON':'PAPER OFF';pb.className='b '+(d.running?'on':'');status.textContent=d.running?`RUNNING • cycle ${d.cycle_count} • ${d.last_cycle||'—'}`:'Engine OFF';if(d.last_error)status.textContent+=' • ERROR: '+d.last_error;pos.innerHTML=d.positions.map(x=>`<tr><td>${x.symbol} ${x.timeframe}</td><td>${x.entry_price}</td><td>${x.current_price}</td><td class="${x.unrealized_pnl>=0?'g':'r'}">${money(x.unrealized_pnl)}</td></tr>`).join('')||'<tr><td>No open positions</td></tr>';trades.innerHTML=d.trades.slice(0,5).map(x=>`<tr><td>${x.symbol}</td><td>${x.timeframe}</td><td>${x.entry}</td><td>${x.exit}</td><td class="${x.pnl>=0?'g':'r'}">${money(x.pnl)}</td></tr>`).join('')||'<tr><td>No closed trades yet</td></tr>';session.textContent=`Trades: ${d.trades.length} • Open: ${d.positions.length} • Realized: ${money(d.realized_pnl)} • Unrealized: ${money(d.unrealized_pnl)}`}async function refresh(){try{render(await j('/api/state'))}catch(e){status.textContent='Connection error: '+e.message}}refresh();setInterval(refresh,2000);setInterval(()=>fetch('/api/health').catch(()=>{}),20000)</script></body></html>'''
+ async with lock:S.update({'running':False,'balance':BAL,'free':BAL,'real':0.0,'positions':{},'trades':[],'orders':[],'pairs':[],'radar':[],'err':None,'started':None,'cycle':0,'rotation':None})
+ return snap()
+HTML=r'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Fast Scalper — New Start</title><style>*{box-sizing:border-box}body{font-family:Arial;background:#080e1d;color:#eef2ff;margin:0;padding:12px}.w{max-width:920px;margin:auto}.head{display:flex;justify-content:space-between;align-items:center}h2{margin:8px 0 2px}.m{color:#8793ad;font-size:12px}.card{background:#131b2d;border:1px solid #293650;border-radius:14px;padding:12px;margin-top:9px}.balance{position:relative;padding-right:145px}.free{position:absolute;right:12px;top:12px}.v{font-size:18px;font-weight:700}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:8px}.stat{background:#10172a;border-radius:9px;padding:8px}.controls{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px}.btn{border:0;border-radius:10px;padding:11px;font-weight:700;color:#fff;background:#273552}.on{background:#07824e}.stop{background:#9d2d3d}.pairs{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:8px}.pair{background:#0d1424;border:1px solid #2b3854;border-radius:9px;padding:7px}.pair input{width:58%;background:transparent;color:#fff;border:0;outline:0;font-weight:700}.pair select{float:right;background:#111a2c;color:#fff;border:1px solid #33405b;border-radius:6px;padding:3px}.radar{display:none;margin-top:8px}.radar.open{display:block}.rg{display:grid;grid-template-columns:1fr 1fr;gap:5px}.cand{display:flex;justify-content:space-between;background:#0d1424;border:1px solid #283550;border-radius:8px;padding:7px}table{width:100%;border-collapse:collapse}td,th{padding:7px 4px;border-bottom:1px solid #273149;font-size:12px;text-align:left}.g{color:#42e28a}.r{color:#ff6873}.timer{font-size:22px;font-weight:800}@media(max-width:650px){.stats{grid-template-columns:repeat(2,1fr)}.pairs{grid-template-columns:repeat(3,1fr)}.rg{grid-template-columns:1fr}}</style></head><body><div class="w"><div class="head"><div><h2>Fast Scalper — New Start</h2><div class="m">PAPER • 6 active pairs • 10-pair radar • 20s rotation</div></div><div class="timer" id="timer">00</div></div><div class="card balance"><div class="m">Account Balance</div><div class="v" id="bal">—</div><div class="free"><div class="m">Free Balance</div><div class="v" id="free">—</div></div><div class="stats"><div class="stat"><div class="m">Realized PnL</div><div class="v" id="real">—</div></div><div class="stat"><div class="m">Unrealized PnL</div><div class="v" id="unreal">—</div></div><div class="stat"><div class="m">Net PnL</div><div class="v" id="net">—</div></div><div class="stat"><div class="m">Engine</div><div class="v" id="eng">OFF</div></div></div></div><div class="card controls"><button class="btn" id="on" onclick="toggle()">PAPER OFF</button><button class="btn stop" onclick="stop()">EMERGENCY STOP</button><button class="btn" onclick="resetAll()">RESET</button></div><div class="card"><b>Open Positions</b><table><tbody id="pos"></tbody></table></div><div class="card"><b>Session Result</b><div class="m" id="session">Trades: 0 • Open: 0 • Realized: 0.00 USDT • Unrealized: 0.00 USDT</div><div class="m" id="cy">Cycle: 0 • Last: —</div></div><div class="card"><b>6 Active Pairs</b><div class="m">Только эти 6 пар участвуют в ордерном цикле.</div><div class="pairs" id="pairs"></div><div class="controls" style="margin-top:7px"><button class="btn" onclick="save()">SAVE 6 PAIRS</button><button class="btn" onclick="radarToggle()">⌄ RATING / 10 PAIRS</button><span></span></div><div class="radar" id="radar"><div class="m" style="margin:7px 0">Рейтинг обновляется каждые 20 секунд во время PAPER.</div><div class="rg" id="rl"></div></div></div><div class="card"><details><summary>Binance API / подключение</summary><div class="m" style="margin-top:7px">В PAPER ключи не используются. Этот блок подготовлен для реального режима.</div></details></div><div class="card"><b>Closed Trades — latest 5</b><table><thead><tr><th>Pair</th><th>TF</th><th>Score</th><th>PnL</th></tr></thead><tbody id="tr"></tbody></table></div><div class="card"><div class="m" id="status">Engine OFF</div><div class="r" id="err"></div></div></div><script>const $=id=>document.getElementById(id),opts=['1m','3m','5m'];function money(x){return Number(x||0).toFixed(2)+' USDT'}function clock(s){return String(Math.max(0,Math.floor(s))).padStart(2,'0')}function build(a=[]){$('pairs').innerHTML='';for(let i=0;i<6;i++){let p=a[i]||{};$('pairs').innerHTML+=`<div class="pair"><input id="p${i}" placeholder="BTCUSDT" value="${p.symbol||''}"><select id="f${i}">${opts.map(x=>`<option ${x===(p.timeframe||'3m')?'selected':''}>${x}</option>`).join('')}</select></div>`}}async function j(u,o){let r=await fetch(u,o),d=await r.json();if(!r.ok)throw Error(d.detail||'request failed');return d}async function toggle(){try{render(await j($('on').textContent.includes('OFF')?'/api/paper/start':'/api/paper/stop',{method:'POST'}))}catch(e){$('err').textContent=e.message}}async function stop(){try{render(await j('/api/paper/stop',{method:'POST'}))}catch(e){$('err').textContent=e.message}}async function resetAll(){try{render(await j('/api/reset',{method:'POST'}))}catch(e){$('err').textContent=e.message}}async function save(){let p=[];for(let i=0;i<6;i++){let s=$('p'+i).value.trim().toUpperCase();if(s)p.push({symbol:s,timeframe:$('f'+i).value})}try{render(await j('/api/pairs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pairs:p})}))}catch(e){$('err').textContent=e.message}}async function radarToggle(){let x=$('radar');x.classList.toggle('open');if(x.classList.contains('open'))try{render(await j('/api/radar',{method:'POST'}))}catch(e){$('err').textContent=e.message}}function render(d){$('bal').textContent=money(d.balance);$('free').textContent=money(d.free);$('real').textContent=money(d.real);$('unreal').textContent=money(d.unreal);$('net').textContent=money(d.net);$('eng').textContent=d.running?'ON':'OFF';$('eng').className='v '+(d.running?'g':'');$('on').textContent=d.running?'PAPER ON':'PAPER OFF';$('on').className='btn '+(d.running?'on':'');$('timer').textContent=d.running?clock(d.left):'00';$('status').textContent=d.running?`RUNNING • cycle ${d.cycle} • rotation ${d.left}s`:'Engine OFF';$('session').textContent=`Trades: ${d.trades.length} • Open: ${d.positions.length} • Realized: ${money(d.real)} • Unrealized: ${money(d.unreal)}`;$('cy').textContent=`Cycle: ${d.cycle} • Last: ${d.last_cycle||'—'}`;$('pos').innerHTML=d.positions.map(x=>`<tr><td>${x.symbol}</td><td>${x.timeframe}</td><td>${Number(x.score).toFixed(1)}</td><td class="${x.pnl>=0?'g':'r'}">${money(x.pnl)}</td></tr>`).join('')||'<tr><td colspan="4">No open positions</td></tr>';$('tr').innerHTML=d.trades.slice(0,5).map(x=>`<tr><td>${x.symbol}</td><td>${x.timeframe}</td><td>${Number(x.score||0).toFixed(1)}</td><td class="${x.pnl>=0?'g':'r'}">${money(x.pnl)}</td></tr>`).join('')||'<tr><td colspan="4">No closed trades yet</td></tr>';$('rl').innerHTML=(d.radar||[]).map((x,i)=>`<div class="cand"><span>${i+1}. ${x.symbol} <span class="m">${Number(x.change).toFixed(2)}%</span></span><b>${Number(x.rating).toFixed(1)}</b></div>`).join('')||'<div class="m">Нет данных рейтинга</div>';$('err').textContent=d.err||'';build(d.pairs)}async function refresh(){try{render(await j('/api/state'))}catch(e){$('err').textContent='Connection error: '+e.message}}build();refresh();setInterval(refresh,2000)</script></body></html>'''
 @app.get('/',response_class=HTMLResponse)
-async def root(): return HTMLResponse(HTML,headers={'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0'})
+async def root():return HTMLResponse(HTML,headers={'Cache-Control':'no-store,no-cache,must-revalidate,max-age=0'})
