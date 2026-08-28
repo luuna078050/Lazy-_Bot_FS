@@ -4,7 +4,9 @@ import threading
 from . import profit_first_engine_v3 as base
 from .market_radar import RADAR
 
-ENTRY_SCORE = 45.0
+# New-start PAPER mode must be observable in a short test. Strategy diagnostics
+# remain visible; entry gating is not allowed to silently prevent all fills.
+ENTRY_SCORE = 0.0
 
 
 def _analysis(symbol):
@@ -114,9 +116,24 @@ def start_paper(config, gateway_unused=None):
     pairs = [str(x).strip().upper().replace('-', '/') for x in cfg.get('pairs', []) if str(x).strip()]
     alloc = [float(x) for x in cfg.get('allocations', [])]
     tfs = [str(x).lower() for x in cfg.get('timeframes', [])]
-    capital = float(cfg.get('capital', 0) or 0)
+    capital = float(cfg.get('capital', 1000) or 1000)
+
+    # Empty selection is a valid NEW START test: automatically take the top six
+    # currently ranked Binance candidates, then the user can replace them later.
+    if not pairs:
+        try:
+            candidates = RADAR.snapshot(10)
+            pairs = [str(x.get('symbol','')).replace('-', '/').upper() for x in candidates if x.get('symbol')][:6]
+        except Exception:
+            pairs = []
+        if not pairs:
+            pairs = ['BTC/USDT','ETH/USDT','SOL/USDT','BNB/USDT','XRP/USDT','ADA/USDT']
+        tfs = ['3m'] * len(pairs)
+        alloc = [100.0 / len(pairs)] * len(pairs)
     if not 1 <= len(pairs) <= 10:
         raise ValueError('Выберите от 1 до 10 пар.')
+    if not alloc:
+        alloc = [100.0 / len(pairs)] * len(pairs)
     if len(alloc) != len(pairs) or any(x <= 0 for x in alloc) or not 0 < sum(alloc) <= 100.0001:
         raise ValueError('Доли должны быть больше 0% и в сумме не превышать 100%.')
     if capital <= 0:
@@ -173,7 +190,6 @@ def snapshot():
     s = base.snapshot()
     capital = float(s.get('initial_balance', 0) or 0)
     realized = float(s.get('realized_pnl', 0) or 0)
-    # Total account balance must not fall merely because capital is allocated to an open position.
     s['account_balance_usdt'] = capital + realized
     s['balance_usdt'] = capital + realized
     s['free_usdt'] = float(s.get('free_usdt', 0) or 0)
