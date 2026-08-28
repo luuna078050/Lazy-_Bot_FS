@@ -1,1 +1,1 @@
-from .scalper_v2 import app
+from .clean_app import app
