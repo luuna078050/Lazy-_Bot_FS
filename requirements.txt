@@ -1,6 +1,4 @@
 fastapi==0.116.1
 uvicorn[standard]==0.35.0
 httpx==0.28.1
-pydantic==2.11.7
-# Pin to a wheel-supported release for Render's Python 3.14 image.
-pydantic-core==2.33.2
+pydantic==2.12.5
