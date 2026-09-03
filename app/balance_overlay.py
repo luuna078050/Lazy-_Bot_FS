@@ -12,6 +12,9 @@ REAL = {"usdt": None, "updated": 0.0, "error": None}
 class WithdrawRequest(BaseModel):
     amount: float = Field(gt=0, le=1_000_000)
 
+class CapitalRequest(BaseModel):
+    amount: float = Field(gt=0, le=1_000_000)
+
 async def _real_usdt():
     if not KEYS["api_key"] or not KEYS["secret_key"]:
         return None
@@ -77,9 +80,16 @@ def install(m):
             await _cached_real_usdt()
         return {"ok": True, "configured": configured, "account_source": "BINANCE" if configured and REAL["usdt"] is not None else "PAPER"}
 
+    async def capital(b: CapitalRequest):
+        async with m.L:
+            if m.S.get("positions"):
+                raise HTTPException(400, "Stop trading and close positions before changing Bot Capital")
+            amount = float(b.amount)
+            m.S["bot"] = amount
+            m.S["free"] = amount
+        return await state()
+
     async def withdraw(b: WithdrawRequest):
-        # Strategy-to-account transfer in the PAPER accounting model.
-        # This endpoint never sends a withdrawal request to Binance.
         async with m.L:
             bot = float(m.S.get("bot", 0.0))
             free = float(m.S.get("free", 0.0))
@@ -99,6 +109,7 @@ def install(m):
     if r:
         r.endpoint = keys
     app.add_api_route("/api/strategy/withdraw", withdraw, methods=["POST"])
+    app.add_api_route("/api/strategy/capital", capital, methods=["POST"])
 
     marker = "</body></html>"
     if marker not in m.HTML:
@@ -110,8 +121,19 @@ def install(m):
     const host=document.getElementById('free')?.closest('.stat');
     if(!host) return;
     host.id='strategyBox';
-    host.innerHTML='<div class="m">Free Balance / Bot Balance</div><div class="v" id="free">100.0000 / 100.0000 USDT</div><div class="m" style="margin-top:5px">Strategy Profit: <span id="strategyProfit">0.0000</span> USDT</div><div style="display:flex;gap:6px;margin-top:7px"><input class="input" id="withdrawAmount" type="number" min="0" step="0.0001" placeholder="Withdraw USDT"><button class="btn" onclick="withdrawStrategy()">WITHDRAW</button></div><div class="m" id="withdrawInfo" style="margin-top:5px"></div>';
+    host.innerHTML='<div class="m">Free Balance / Bot Balance</div><div class="v" id="free">100.0000 / 100.0000 USDT</div><div class="m" style="margin-top:5px">Strategy Profit: <span id="strategyProfit">0.0000</span> USDT</div><div style="display:flex;gap:6px;margin-top:7px"><input class="input" id="capitalAmount" type="number" min="0.0001" step="0.0001" placeholder="Bot Capital USDT"><button class="btn" onclick="setCapital()">SET CAPITAL</button></div><div style="display:flex;gap:6px;margin-top:7px"><input class="input" id="withdrawAmount" type="number" min="0" step="0.0001" placeholder="Withdraw USDT"><button class="btn" onclick="withdrawStrategy()">WITHDRAW</button></div><div class="m" id="withdrawInfo" style="margin-top:5px"></div>';
   }
+  window.setCapital=async function(){
+    const a=Number(document.getElementById('capitalAmount')?.value||0);
+    if(!(a>0)){alert('Укажи Bot Capital');return;}
+    try{
+      const r=await fetch('/api/strategy/capital',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({amount:a})});
+      const d=await r.json(); if(!r.ok) throw Error(d.detail||'Capital error');
+      document.getElementById('capitalAmount').value='';
+      document.getElementById('withdrawInfo').textContent='Bot Capital set to '+a.toFixed(4)+' USDT';
+      if(typeof load==='function') await load();
+    }catch(e){document.getElementById('withdrawInfo').textContent=e.message;}
+  };
   window.withdrawStrategy=async function(){
     const a=Number(document.getElementById('withdrawAmount')?.value||0);
     if(!(a>0)){alert('Укажи сумму вывода');return;}
