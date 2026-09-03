@@ -6,7 +6,7 @@ from fastapi import FastAPI,HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel,Field
 app=FastAPI(title='Fast Scalper')
-BINANCE='https://api.binance.com'; UNIVERSE=['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','DOGEUSDT','ADAUSDT','TRXUSDT','LINKUSDT','SUIUSDT','AVAXUSDT','TONUSDT','LTCUSDT','DOTUSDT','ATOMUSDT','NEARUSDT','APTUSDT','ARBUSDT','OPUSDT','FILUSDT']; ANALYSIS_TFS=['1m','3m','5m','15m','30m']; TRADING_TF='3m'; START_ACCOUNT=150.; START_BOT=100.; ROTATE=20
+BINANCE='https://api.binance.com'; UNIVERSE=['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','DOGEUSDT','ADAUSDT','TRXUSDT','LINKUSDT','SUIUSDT','AVAXUSDT','TONUSDT','LTCUSDT','DOTUSDT','ATOMUSDT','NEARUSDT','APTUSDT','ARBUSDT','OPUSDT','FILUSDT']; ANALYSIS_TFS=['1m','3m','5m','15m','30m']; TRADING_TF='3m'; START_ACCOUNT=150.; START_BOT=100.; ROTATE=420
 S={'running':False,'account':START_ACCOUNT,'bot':START_BOT,'free':START_BOT,'realized':0.,'positions':[],'closed':[],'orders':[],'ranking':[],'slots':[None]*6,'profit':0.,'reinvest':False,'cycle':0,'started':None,'last_radar':0.,'error':None}
 L=asyncio.Lock(); SEM=asyncio.Semaphore(8)
 def now():return datetime.now(timezone.utc).isoformat()
