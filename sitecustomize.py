@@ -21,7 +21,8 @@ try:
     _fast_scalper_main.BINANCE = "https://data-api.binance.vision"
 
     # Binance request-weight guard: keep Fast Scalper at a calm 300 weight/min.
-    # The limiter counts conservatively and queues requests instead of bursting.
+    # The limiter counts the actual weight of the public endpoints used here
+    # and queues requests instead of bursting beyond the budget.
     _binance_budget = 300
     _binance_used = deque()
     _binance_lock = asyncio.Lock()
@@ -30,7 +31,8 @@ try:
         if path.startswith("/api/v3/klines"):
             return 2
         if path.startswith("/api/v3/ticker/24hr"):
-            return 5
+            # Without a symbol parameter this endpoint has weight 80.
+            return 80
         return 2
 
     async def _wait_binance_budget(weight):
@@ -132,13 +134,13 @@ try:
     _fast_scalper_main.ranking = _ranking_with_tobicore
     _fast_scalper_main.openp = _openp_with_tobicore
 
-    # Radar refresh: 3 minutes, reducing Binance request pressure.
+    # Radar refresh: 10 minutes, reducing Binance request pressure.
     _original_radar = _fast_scalper_main.radar
-    async def _radar_3min(force=False):
-        if not force and time.time() - _fast_scalper_main.S["last_radar"] < 180:
+    async def _radar_10min(force=False):
+        if not force and time.time() - _fast_scalper_main.S["last_radar"] < 600:
             return
         return await _original_radar(force)
-    _fast_scalper_main.radar = _radar_3min
+    _fast_scalper_main.radar = _radar_10min
 
     # Keep the visible UI consistent with the requested 1-minute trading TF.
     _fast_scalper_main.HTML = _fast_scalper_main.HTML.replace(
