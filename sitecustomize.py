@@ -16,6 +16,10 @@ try:
     _fast_scalper_main.S["bot"] = 600.0
     _fast_scalper_main.S["free"] = 600.0
 
+    # Use Binance's dedicated market-data endpoint for the radar.
+    # It supports the public kline/ticker endpoints used by Fast Scalper.
+    _fast_scalper_main.BINANCE = "https://data-api.binance.vision"
+
     # Binance request-weight guard: keep Fast Scalper at a calm 300 weight/min.
     # The limiter counts conservatively and queues requests instead of bursting.
     _binance_budget = 300
