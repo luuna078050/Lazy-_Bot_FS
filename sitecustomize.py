@@ -4,6 +4,7 @@ try:
     _balance_overlay.install(_fast_scalper_main)
 
     import asyncio, math, time
+    from collections import deque
     from app.tobicore_bridge import signal as _tc_signal, best_signal as _tc_best
 
     # Requested configuration corrections/additions only.
@@ -14,6 +15,40 @@ try:
     _fast_scalper_main.S["account"] = 1000.0
     _fast_scalper_main.S["bot"] = 600.0
     _fast_scalper_main.S["free"] = 600.0
+
+    # Binance request-weight guard: keep Fast Scalper at a calm 300 weight/min.
+    # The limiter counts conservatively and queues requests instead of bursting.
+    _binance_budget = 300
+    _binance_used = deque()
+    _binance_lock = asyncio.Lock()
+
+    def _binance_weight(path):
+        if path.startswith("/api/v3/klines"):
+            return 2
+        if path.startswith("/api/v3/ticker/24hr"):
+            return 5
+        return 2
+
+    async def _wait_binance_budget(weight):
+        while True:
+            async with _binance_lock:
+                now = time.monotonic()
+                while _binance_used and now - _binance_used[0][0] >= 60:
+                    _binance_used.popleft()
+                used = sum(w for _, w in _binance_used)
+                if used + weight <= _binance_budget:
+                    _binance_used.append((now, weight))
+                    return
+                wait_for = max(0.05, 60 - (now - _binance_used[0][0]))
+            await asyncio.sleep(wait_for)
+
+    _original_get = _fast_scalper_main.get
+
+    async def _get_limited(path, p=None):
+        await _wait_binance_budget(_binance_weight(path))
+        return await _original_get(path, p)
+
+    _fast_scalper_main.get = _get_limited
 
     _original_ranking = _fast_scalper_main.ranking
     _original_openp = _fast_scalper_main.openp
