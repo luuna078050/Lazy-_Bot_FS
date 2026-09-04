@@ -3,7 +3,7 @@ try:
     from app import balance_overlay as _balance_overlay
     _balance_overlay.install(_fast_scalper_main)
 
-    import asyncio, math, time
+    import asyncio, json, math, time
     from collections import deque
     from app.tobicore_bridge import signal as _tc_signal, best_signal as _tc_best
 
@@ -16,20 +16,21 @@ try:
     _fast_scalper_main.S["bot"] = 600.0
     _fast_scalper_main.S["free"] = 600.0
 
-    # Use Binance's dedicated market-data endpoint for the radar.
+    # Keep Binance market data on the dedicated public market-data endpoint.
     _fast_scalper_main.BINANCE = "https://data-api.binance.vision"
 
-    # Keep Fast Scalper well below Binance's request-weight ceiling.
+    # Radar request budget. A normal radar pass is 1 batch ticker + 100 klines.
     _binance_budget = 300
     _binance_used = deque()
     _binance_lock = asyncio.Lock()
+    _binance_block_until = 0.0
 
-    def _binance_weight(path):
+    def _binance_weight(path, p=None):
         if path.startswith("/api/v3/klines"):
             return 2
         if path.startswith("/api/v3/ticker/24hr"):
-            # No-symbol 24hr ticker is a heavy request.
-            return 80
+            # The wrapper below always supplies 1-20 symbols: weight 1.
+            return 1
         return 2
 
     async def _wait_binance_budget(weight):
@@ -48,8 +49,40 @@ try:
     _original_get = _fast_scalper_main.get
 
     async def _get_limited(path, p=None):
-        await _wait_binance_budget(_binance_weight(path))
-        return await _original_get(path, p)
+        nonlocal_marker = None
+        global _binance_block_until
+
+        # Never send the old all-symbol /ticker/24hr request. Keep the exact
+        # universe used by Fast Scalper and request it as one 20-symbol batch.
+        if path == "/api/v3/ticker/24hr" and not p:
+            p = {
+                "symbols": json.dumps(
+                    list(_fast_scalper_main.UNIVERSE),
+                    separators=(",", ":"),
+                ),
+                "type": "MINI",
+            }
+
+        now = time.monotonic()
+        if now < _binance_block_until:
+            return []
+
+        await _wait_binance_budget(_binance_weight(path, p))
+        try:
+            return await _original_get(path, p)
+        except Exception as exc:
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            if status in (418, 429):
+                retry_after = 60.0
+                try:
+                    retry_after = float(response.headers.get("Retry-After", retry_after))
+                except Exception:
+                    pass
+                _binance_block_until = time.monotonic() + max(1.0, retry_after)
+                # Do not hammer Binance while it is asking the client to back off.
+                return []
+            raise
 
     _fast_scalper_main.get = _get_limited
 
@@ -126,7 +159,7 @@ try:
     _fast_scalper_main.ranking = _ranking_with_tobicore
     _fast_scalper_main.openp = _openp_with_tobicore
 
-    # Radar refresh: 70 seconds, reducing Binance request pressure.
+    # Radar refresh: exactly 70 seconds minimum between passes.
     _original_radar = _fast_scalper_main.radar
     async def _radar_70s(force=False):
         if not force and time.time() - _fast_scalper_main.S["last_radar"] < 70:
