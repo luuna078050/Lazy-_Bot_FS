@@ -17,12 +17,9 @@ try:
     _fast_scalper_main.S["free"] = 600.0
 
     # Use Binance's dedicated market-data endpoint for the radar.
-    # It supports the public kline/ticker endpoints used by Fast Scalper.
     _fast_scalper_main.BINANCE = "https://data-api.binance.vision"
 
-    # Binance request-weight guard: keep Fast Scalper at a calm 300 weight/min.
-    # The limiter counts the actual weight of the public endpoints used here
-    # and queues requests instead of bursting beyond the budget.
+    # Keep Fast Scalper well below Binance's request-weight ceiling.
     _binance_budget = 300
     _binance_used = deque()
     _binance_lock = asyncio.Lock()
@@ -31,7 +28,7 @@ try:
         if path.startswith("/api/v3/klines"):
             return 2
         if path.startswith("/api/v3/ticker/24hr"):
-            # Without a symbol parameter this endpoint has weight 80.
+            # No-symbol 24hr ticker is a heavy request.
             return 80
         return 2
 
@@ -70,9 +67,6 @@ try:
         cmax = max([abs(x) for x in changes] + [1.0])
         vmax = max([float(r.get("volume", 0.0)) for r in rows] + [1.0])
 
-        # Add to the existing candle/EMA score; do not remove the original analysis.
-        # Cheap unit price is a secondary preference, while movement, volume and
-        # hotness remain important for a fast scalp.
         for r in rows:
             price = max(float(r.get("price", 0.0)), 1e-12)
             change = float(r.get("change", 0.0))
@@ -82,8 +76,6 @@ try:
             hot = min(100.0, 50.0 + (change / cmax) * 50.0)
             liquidity = min(100.0, 100.0 * math.log1p(max(float(r.get("volume", 0.0)), 0.0)) / math.log1p(vmax))
             movement = min(100.0, 50.0 + min(momentum * 20.0, 50.0))
-            # Existing score 50%; candle/price movement 20%; hotness 15%;
-            # liquidity 10%; lower unit price 5%.
             extra = (
                 base * 0.50
                 + movement * 0.20
@@ -134,15 +126,14 @@ try:
     _fast_scalper_main.ranking = _ranking_with_tobicore
     _fast_scalper_main.openp = _openp_with_tobicore
 
-    # Radar refresh: 10 minutes, reducing Binance request pressure.
+    # Radar refresh: 70 seconds, reducing Binance request pressure.
     _original_radar = _fast_scalper_main.radar
-    async def _radar_10min(force=False):
-        if not force and time.time() - _fast_scalper_main.S["last_radar"] < 600:
+    async def _radar_70s(force=False):
+        if not force and time.time() - _fast_scalper_main.S["last_radar"] < 70:
             return
         return await _original_radar(force)
-    _fast_scalper_main.radar = _radar_10min
+    _fast_scalper_main.radar = _radar_70s
 
-    # Keep the visible UI consistent with the requested 1-minute trading TF.
     _fast_scalper_main.HTML = _fast_scalper_main.HTML.replace(
         "Trading TF: 3m", "Trading TF: 1m"
     ).replace(
