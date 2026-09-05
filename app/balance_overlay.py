@@ -95,7 +95,6 @@ def install(m):
                 raise HTTPException(400, f"Maximum available for withdraw: {bot_free:.4f} USDT")
             m.S["bot"] = bot - amount
             m.S["free"] = bot_free - amount
-            # Total account capital is conserved by an internal Bot -> Account transfer.
         return await state()
 
     async def allocate_bot(b: BotAllocationRequest):
@@ -171,3 +170,10 @@ def install(m):
 })();
 </script>'''
     m.HTML = m.HTML.replace(marker, injected + marker)
+    # The core renderer refreshes every 2 seconds and otherwise shows S['free'],
+    # which is trading cash after open stakes. The balance panel must show
+    # Account Free = Account Balance - Bot Balance instead.
+    m.HTML = m.HTML.replace(
+        "$('free').textContent=money(d.free)+' / '+money(d.bot_balance)+' USDT'",
+        "$('free').textContent=money(d.account_free)+' / '+money(d.bot_balance)+' USDT'",
+    )
