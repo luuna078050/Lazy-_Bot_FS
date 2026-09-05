@@ -8,13 +8,14 @@ try:
     from app.tobicore_bridge import signal as _tc_signal, best_signal as _tc_best
 
     # Requested configuration corrections/additions only.
-    _fast_scalper_main.START_ACCOUNT = 1000.0
-    _fast_scalper_main.START_BOT = 600.0
+    # Account is the dynamic total capital; Bot is the dynamic amount allocated to strategy.
+    _fast_scalper_main.START_ACCOUNT = 1850.0
+    _fast_scalper_main.START_BOT = 0.0
     _fast_scalper_main.TRADING_TF = "1m"
     _fast_scalper_main.ROTATE = 60
-    _fast_scalper_main.S["account"] = 1000.0
-    _fast_scalper_main.S["bot"] = 600.0
-    _fast_scalper_main.S["free"] = 600.0
+    _fast_scalper_main.S["account"] = 1850.0
+    _fast_scalper_main.S["bot"] = 0.0
+    _fast_scalper_main.S["free"] = 0.0
 
     # Keep Binance market data on the dedicated public market-data endpoint.
     _fast_scalper_main.BINANCE = "https://data-api.binance.vision"
