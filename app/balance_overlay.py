@@ -12,6 +12,9 @@ REAL = {"usdt": None, "updated": 0.0, "error": None}
 class WithdrawRequest(BaseModel):
     amount: float = Field(gt=0, le=1_000_000)
 
+class BotAllocationRequest(BaseModel):
+    amount: float = Field(ge=0, le=1_000_000)
+
 async def _real_usdt():
     if not KEYS["api_key"] or not KEYS["secret_key"]:
         return None
@@ -62,9 +65,12 @@ def install(m):
         else:
             d["account_source"] = "PAPER"
         d["real_account"] = real
-        d["strategy_balance"] = float(m.S.get("bot", 0.0))
-        d["strategy_profit"] = max(0.0, float(m.S.get("bot", 0.0)) - float(m.START_BOT))
-        d["withdraw_available"] = max(0.0, min(float(m.S.get("free", 0.0)), float(m.S.get("bot", 0.0)) - float(m.START_BOT)))
+        bot = float(m.S.get("bot", 0.0))
+        total = float(d.get("account", m.START_ACCOUNT))
+        d["strategy_balance"] = bot
+        d["account_free"] = max(0.0, total - bot)
+        d["strategy_profit"] = max(0.0, bot - float(m.START_BOT))
+        d["withdraw_available"] = max(0.0, float(m.S.get("free", 0.0))) if not m.S.get("running") and not m.S.get("positions") else 0.0
         d["account_error"] = REAL["error"]
         return d
 
@@ -78,18 +84,32 @@ def install(m):
         return {"ok": True, "configured": configured, "account_source": "BINANCE" if configured and REAL["usdt"] is not None else "PAPER"}
 
     async def withdraw(b: WithdrawRequest):
-        # Strategy-to-account transfer in the PAPER accounting model.
-        # This endpoint never sends a withdrawal request to Binance.
+        # PAPER accounting transfer: Bot -> Account. Never sends funds to Binance.
         async with m.L:
+            if m.S.get("running") or m.S.get("positions"):
+                raise HTTPException(400, "Withdraw is available only after STOP and all open cycles are closed")
             bot = float(m.S.get("bot", 0.0))
-            free = float(m.S.get("free", 0.0))
-            available = max(0.0, min(free, bot - float(m.START_BOT)))
+            bot_free = float(m.S.get("free", 0.0))
             amount = float(b.amount)
-            if amount > available + 1e-9:
-                raise HTTPException(400, f"Maximum available for withdraw: {available:.4f} USDT")
+            if amount > bot_free + 1e-9:
+                raise HTTPException(400, f"Maximum available for withdraw: {bot_free:.4f} USDT")
             m.S["bot"] = bot - amount
-            m.S["free"] = free - amount
-            m.S["account"] = float(m.S.get("account", m.START_ACCOUNT)) + amount
+            m.S["free"] = bot_free - amount
+            # Total account capital is conserved by an internal Bot -> Account transfer.
+        return await state()
+
+    async def allocate_bot(b: BotAllocationRequest):
+        # PAPER accounting transfer: Account Free -> Bot. Total account capital is conserved.
+        async with m.L:
+            if m.S.get("running") or m.S.get("positions"):
+                raise HTTPException(400, "Bot allocation is available only after STOP and all open cycles are closed")
+            total = float(m.S.get("account", m.START_ACCOUNT))
+            current = float(m.S.get("bot", 0.0))
+            amount = float(b.amount)
+            if amount > total + 1e-9:
+                raise HTTPException(400, f"Bot allocation cannot exceed Account Balance: {total:.4f} USDT")
+            m.S["bot"] = amount
+            m.S["free"] = amount
         return await state()
 
     r = _route(app, "/api/state")
@@ -99,6 +119,7 @@ def install(m):
     if r:
         r.endpoint = keys
     app.add_api_route("/api/strategy/withdraw", withdraw, methods=["POST"])
+    app.add_api_route("/api/strategy/allocate", allocate_bot, methods=["POST"])
 
     marker = "</body></html>"
     if marker not in m.HTML:
@@ -110,8 +131,20 @@ def install(m):
     const host=document.getElementById('free')?.closest('.stat');
     if(!host) return;
     host.id='strategyBox';
-    host.innerHTML='<div class="m">Free Balance / Bot Balance</div><div class="v" id="free">100.0000 / 100.0000 USDT</div><div class="m" style="margin-top:5px">Strategy Profit: <span id="strategyProfit">0.0000</span> USDT</div><div style="display:flex;gap:6px;margin-top:7px"><input class="input" id="withdrawAmount" type="number" min="0" step="0.0001" placeholder="Withdraw USDT"><button class="btn" onclick="withdrawStrategy()">WITHDRAW</button></div><div class="m" id="withdrawInfo" style="margin-top:5px"></div>';
+    host.innerHTML='<div class="m">Account Free / Bot Balance</div><div class="v" id="free">100.0000 / 100.0000 USDT</div><div class="m" style="margin-top:5px">Bot allocation is linked to Account Balance</div><div style="display:flex;gap:6px;margin-top:7px"><input class="input" id="botAllocation" type="number" min="0" step="0.0001" placeholder="Bot balance USDT"><button class="btn" onclick="setBotAllocation()">SET BOT</button></div><div style="display:flex;gap:6px;margin-top:7px"><input class="input" id="withdrawAmount" type="number" min="0" step="0.0001" placeholder="Withdraw USDT"><button class="btn" onclick="withdrawStrategy()">WITHDRAW</button></div><div class="m" id="withdrawInfo" style="margin-top:5px"></div>';
   }
+  window.setBotAllocation=async function(){
+    const a=Number(document.getElementById('botAllocation')?.value||0);
+    if(a<0){alert('Укажи корректную сумму');return;}
+    try{
+      const r=await fetch('/api/strategy/allocate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({amount:a})});
+      const d=await r.json();
+      if(!r.ok) throw Error(d.detail||'Bot allocation error');
+      document.getElementById('botAllocation').value='';
+      document.getElementById('withdrawInfo').textContent='Bot Balance set to '+Number(a).toFixed(4)+' USDT';
+      if(typeof load==='function') await load();
+    }catch(e){document.getElementById('withdrawInfo').textContent=e.message;}
+  };
   window.withdrawStrategy=async function(){
     const a=Number(document.getElementById('withdrawAmount')?.value||0);
     if(!(a>0)){alert('Укажи сумму вывода');return;}
@@ -120,7 +153,7 @@ def install(m):
       const d=await r.json();
       if(!r.ok) throw Error(d.detail||'Withdraw error');
       document.getElementById('withdrawAmount').value='';
-      document.getElementById('withdrawInfo').textContent='Transferred to Account Balance: '+Number(a).toFixed(4)+' USDT';
+      document.getElementById('withdrawInfo').textContent='Transferred from Bot to Account: '+Number(a).toFixed(4)+' USDT';
       if(typeof load==='function') await load();
     }catch(e){document.getElementById('withdrawInfo').textContent=e.message;}
   };
@@ -129,10 +162,9 @@ def install(m):
       ensureWithdraw();
       const r=await fetch('/api/state',{cache:'no-store'}); const d=await r.json();
       if(document.getElementById('account')) document.getElementById('account').textContent=Number(d.account||0).toFixed(4)+' USDT';
-      if(document.getElementById('free')) document.getElementById('free').textContent=Number(d.free||0).toFixed(4)+' / '+Number(d.bot_balance||0).toFixed(4)+' USDT';
-      if(document.getElementById('strategyProfit')) document.getElementById('strategyProfit').textContent=Number(d.strategy_profit||0).toFixed(4);
+      if(document.getElementById('free')) document.getElementById('free').textContent=Number(d.account_free||0).toFixed(4)+' / '+Number(d.bot_balance||0).toFixed(4)+' USDT';
       const info=document.getElementById('withdrawInfo');
-      if(info && !info.textContent) info.textContent='Available: '+Number(d.withdraw_available||0).toFixed(4)+' USDT';
+      if(info && !info.textContent) info.textContent='Withdraw available after STOP + closed cycles: '+Number(d.withdraw_available||0).toFixed(4)+' USDT';
     }catch(e){}
   }
   setTimeout(syncBalances,300); setInterval(syncBalances,5000);
