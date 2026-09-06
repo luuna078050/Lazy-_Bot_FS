@@ -10,7 +10,7 @@ from .market_radar import RADAR
 app=FastAPI(title='Fast Scalper v0.4.2 Repair')
 UNIVERSE=['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','DOGEUSDT','ADAUSDT','TRXUSDT','LINKUSDT','SUIUSDT','AVAXUSDT','TONUSDT','LTCUSDT','DOTUSDT','ATOMUSDT','NEARUSDT','APTUSDT','ARBUSDT','OPUSDT','FILUSDT']
 TFS=['1m','3m','5m','15m','30m']; TRADING_TF='3m'; MAX_SLOTS=6
-RADAR_INTERVAL=60; ROTATE_SECONDS=60; MAX_POSITION_SECONDS=180; TIMEOUT_MAX_LOSS_PCT=0.05; START_ACCOUNT=1850.0
+RADAR_INTERVAL=60; ROTATE_SECONDS=60; MAX_POSITION_SECONDS=60; START_ACCOUNT=1850.0
 S:dict[str,Any]={'running':False,'account':START_ACCOUNT,'bot':0.0,'free':0.0,'realized':0.0,'session_realized':0.0,'session_trades':0,'session_started':None,'session_elapsed':0.0,'day_started':None,'positions':[],'closed':[],'orders':[],'ranking':[],'slots':[None]*MAX_SLOTS,'auto_fill':False,'profit':0.0,'reinvest':False,'cycle':0,'started':None,'last_radar':0.0,'error':None,'source':'Binance WebSocket','prices':{}}
 class Start(BaseModel): profit_pct:float=Field(0,ge=0,le=80); reinvest:bool=False
 class Slots(BaseModel): slots:list[str]=Field(default_factory=list,max_length=MAX_SLOTS); profit_pct:float=Field(0,ge=0,le=80); reinvest:bool=False
@@ -58,9 +58,10 @@ def open_position(slot,sym):
 async def manage_positions():
     if not S['positions']:return
     for p in list(S['positions']):
-        p['current']=qprice(p['symbol']) or p['current']; age=time.time()-p['opened']; live=(p['current']/p['entry']-1)*100
+        age=time.time()-p['opened']
+        p['current']=qprice(p['symbol']) or p['current']; live=(p['current']/p['entry']-1)*100
         if S['profit']>0 and live>=S['profit']: close_position(p,'PROFIT_TARGET')
-        elif age>=MAX_POSITION_SECONDS and live>=-TIMEOUT_MAX_LOSS_PCT: close_position(p,'TIMEOUT')
+        elif age>=MAX_POSITION_SECONDS: close_position(p,'TIMEOUT')
 async def engine():
     while True:
         try:
@@ -118,7 +119,12 @@ async def slots(b:Slots):
     if len(clean)>MAX_SLOTS: raise HTTPException(400,f'Maximum {MAX_SLOTS} pairs')
     bad=[x for x in clean if not x.endswith('USDT') or len(x)<=4]
     if bad: raise HTTPException(400,'Unknown Binance pairs: '+','.join(bad))
-    S['slots']=[{'symbol':clean[i],'tf':TRADING_TF,'auto':False} if i<len(clean) else None for i in range(MAX_SLOTS)]
+    new_slots=[{'symbol':clean[i],'tf':TRADING_TF,'auto':False} if i<len(clean) else None for i in range(MAX_SLOTS)]
+    for p in list(S['positions']):
+        idx=int(p.get('slot',-1)); new_sym=clean[idx] if 0<=idx<len(clean) else None
+        if new_sym != p.get('symbol'):
+            close_position(p,'MANUAL_REMOVE')
+    S['slots']=new_slots
     S['auto_fill']=False; S['profit']=b.profit_pct; S['reinvest']=b.reinvest
     return await state()
 @app.post('/api/strategy/allocate')
