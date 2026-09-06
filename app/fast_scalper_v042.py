@@ -1,6 +1,7 @@
 from __future__ import annotations
 import time
 from . import fast_scalper_v042_base as base
+from fastapi.dependencies.utils import get_dependant
 
 # Keep the proven v0.4.2 engine and patch only the requested test regressions.
 # Trading timeframe stays 1m; holding duration is a separate 1m/3m selector.
@@ -9,6 +10,10 @@ base.DEFAULT_HOLD_SECONDS = 60
 base.S['hold_seconds'] = 60
 base.Start.model_fields['hold_seconds'].default = 60
 base.Slots.model_fields['hold_seconds'].default = 60
+
+# Paper-test risk guard: a timeout must never be allowed to turn into a deep loss.
+# Profit target remains user-selected; this is only a hard adverse-move guard.
+MAX_LOSS_PCT = 0.30
 
 
 def close_position(p, reason):
@@ -54,10 +59,30 @@ async def radar(force=False):
 
 base.radar = radar
 
-app = base.app
+# Replace the base position manager so the paper engine has a hard loss guard.
+async def manage_positions():
+    if not base.S['positions']:
+        return
+    try:
+        ticks = await base.get_json('/api/v3/ticker/price')
+        latest = {x.get('symbol'): float(x.get('price')) for x in ticks if isinstance(x,dict) and x.get('symbol')}
+    except Exception:
+        latest = {}
+    for p in list(base.S['positions']):
+        p['current'] = latest.get(p['symbol']) or base.qprice(p['symbol']) or p.get('current') or p['entry']
+        age = time.time() - p['opened']
+        live = (p['current'] / p['entry'] - 1) * 100
+        if base.S['profit'] > 0 and live >= base.S['profit']:
+            close_position(p, 'PROFIT_TARGET')
+        elif live <= -MAX_LOSS_PCT:
+            close_position(p, 'MAX_LOSS')
+        elif age >= base.S['hold_seconds']:
+            close_position(p, 'TIMEOUT')
+
+base.manage_positions = manage_positions
 
 # Dedicated hold-duration endpoint: changing the selector immediately updates the engine.
-@app.post('/api/hold')
+@base.app.post('/api/hold')
 async def set_hold(body: dict):
     try:
         hold = int(body.get('hold_seconds'))
@@ -68,6 +93,28 @@ async def set_hold(body: dict):
     base.S['hold_seconds'] = hold
     return await base.state()
 
+# Manual pairs must not depend on Radar/ticker validation being available.
+# Binance price lookup is still used when the engine actually opens the position.
+@base.app.post('/api/slots_manual')
+async def slots_manual(b: base.Slots):
+    clean = [x.upper().replace('/','') for x in b.slots if x.strip()]
+    if len(clean) > base.MAX_SLOTS:
+        raise base.HTTPException(400, f'Maximum {base.MAX_SLOTS} pairs')
+    if base.S['positions']:
+        raise base.HTTPException(400, 'Close current positions before changing slots')
+    base.S['slots'] = [{'symbol':clean[i], 'tf':base.TRADING_TF, 'auto':False} if i < len(clean) else None for i in range(base.MAX_SLOTS)]
+    base.S['profit'] = b.profit_pct
+    base.S['reinvest'] = b.reinvest
+    base.S['hold_seconds'] = b.hold_seconds
+    return await base.state()
+
+# Replace the original /api/slots route endpoint with the non-blocking manual version.
+for _route in base.app.routes:
+    if getattr(_route, 'path', None) == '/api/slots' and 'POST' in getattr(_route, 'methods', set()):
+        _route.endpoint = slots_manual
+        _route.dependant = get_dependant(path=_route.path, call=slots_manual)
+        break
+
 html = base.HTML
 html = html.replace('Trading TF: 3m', 'Trading TF: 1m')
 html = html.replace('<option value="60">1 min</option><option value="180" selected>3 min</option>', '<option value="60" selected>1 min</option><option value="180">3 min</option>')
@@ -77,6 +124,12 @@ hold_marker = "async function start(){"
 hold_handler = "async function holdChanged(){try{await api('/api/hold',{method:'POST',body:JSON.stringify({hold_seconds:parseInt($('hold').value)})});await refresh()}catch(e){alert(e.message)}}\n"
 if hold_handler not in html:
     html = html.replace(hold_marker, hold_handler + hold_marker, 1)
+# Do not let the 1-second refresh overwrite manual slot editing.
+html = html.replace("let editingSlots=false;", "let editingSlots=false;let holdEditing=false;")
+html = html.replace("$('hold').value=String(j.hold_seconds||180);", "if(!holdEditing)$('hold').value=String(j.hold_seconds||60);")
+html = html.replace("$('hold').value=String(j.hold_seconds||60);", "if(!holdEditing)$('hold').value=String(j.hold_seconds||60);")
+html = html.replace("async function holdChanged(){", "async function holdChanged(){holdEditing=false;")
+html = html.replace("$('hold').addEventListener", "$('hold').addEventListener('focus',()=>holdEditing=true);$('hold').addEventListener") if "$('hold').addEventListener" in html else html
 old_start = "async function start(){try{await api('/api/paper/start',{method:'POST',body:JSON.stringify({profit_pct:parseFloat(($('p').value||'0').replace(',','.')),reinvest:$('reinvest').checked,hold_seconds:parseInt($('hold').value)})});await refresh()}catch(e){alert(e.message)}}"
 new_start = "async function start(){try{await api('/api/slots',{method:'POST',body:JSON.stringify({slots:vals(),profit_pct:parseFloat(($('p').value||'0').replace(',','.')),reinvest:$('reinvest').checked,hold_seconds:parseInt($('hold').value)})});await api('/api/paper/start',{method:'POST',body:JSON.stringify({profit_pct:parseFloat(($('p').value||'0').replace(',','.')),reinvest:$('reinvest').checked,hold_seconds:parseInt($('hold').value)})});await refresh()}catch(e){alert(e.message)}}"
 if old_start not in html:
