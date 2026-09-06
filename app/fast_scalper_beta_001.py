@@ -79,7 +79,7 @@ async def close(p,reason):
   r=await B.market_sell(p['symbol'],p['qty']);status=r.get('status','')
   if status!='FILLED':raise RuntimeError(f'Binance SELL not filled: {status or r}')
   xp=float(r.get('cummulativeQuoteQty') or 0)/float(r.get('executedQty') or p['qty']);proceeds=float(r.get('cummulativeQuoteQty') or 0);pnl=proceeds-p['stake'];S['free']+=proceeds
-  if S['reinvest':
+  if S['reinvest']:
    S['bot']+=pnl
   else:
    S['account']+=pnl
