@@ -1,7 +1,7 @@
 from __future__ import annotations
 import asyncio,hashlib,hmac,os,time
 from datetime import datetime,timezone
-from urllib.parse import urlencode
+from urllib.parse import quote
 import httpx
 from fastapi import FastAPI,HTTPException
 from fastapi.responses import HTMLResponse
@@ -22,12 +22,15 @@ class Binance:
  def configured(self):return bool(self.key and self.secret)
  def sign(self,p):
   if not self.configured:raise RuntimeError('Binance API credentials are not configured')
-  p=dict(p);p.setdefault('timestamp',int(time.time()*1000));p.setdefault('recvWindow',5000);q=urlencode(p);p['signature']=hmac.new(self.secret.encode(),q.encode(),hashlib.sha256).hexdigest();return p
+  p=dict(p);p.setdefault('timestamp',int(time.time()*1000));p.setdefault('recvWindow',5000)
+  q='&'.join(f'{quote(str(k),safe="-_.~")}={quote(str(v),safe="-_.~")}' for k,v in p.items())
+  p['signature']=hmac.new(self.secret.encode('utf-8'),q.encode('utf-8'),hashlib.sha256).hexdigest();return p
  async def ping(self):
   async with httpx.AsyncClient(timeout=8) as c:r=await c.get(self.base+'/v3/ping');r.raise_for_status()
  async def account(self):
-  p=self.sign({})
   async with httpx.AsyncClient(timeout=8) as c:
+   tr=await c.get(self.base+'/v3/time');tr.raise_for_status();server_ms=int(tr.json()['serverTime'])
+   p=self.sign({'timestamp':server_ms})
    r=await c.get(self.base+'/v3/account',params=p,headers={'X-MBX-APIKEY':self.key})
   if r.status_code>=400:
    try: body=r.json()
