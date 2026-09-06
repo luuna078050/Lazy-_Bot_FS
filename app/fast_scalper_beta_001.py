@@ -39,6 +39,21 @@ class Binance:
    except Exception: body=r.text[:500]
    raise RuntimeError(f'Binance HTTP {r.status_code}: {body}')
   return r.json()
+ async def order(self,params):
+  p=dict(params)
+  async with httpx.AsyncClient(timeout=10) as c:
+   tr=await c.get(self.base+'/v3/time');tr.raise_for_status();p['timestamp']=int(tr.json()['serverTime'])
+   p=self.sign(p)
+   r=await c.post(self.base+'/v3/order',params=p,headers={'X-MBX-APIKEY':self.key})
+  if r.status_code>=400:
+   try: body=r.json()
+   except Exception: body=r.text[:500]
+   raise RuntimeError(f'Binance order HTTP {r.status_code}: {body}')
+  return r.json()
+ async def market_buy(self,symbol,quote_qty):
+  return await self.order({'symbol':symbol,'side':'BUY','type':'MARKET','quoteOrderQty':f'{quote_qty:.8f}','newOrderRespType':'FULL'})
+ async def market_sell(self,symbol,qty):
+  return await self.order({'symbol':symbol,'side':'SELL','type':'MARKET','quantity':str(qty),'newOrderRespType':'FULL'})
 B=Binance()
 
 async def radar(force=False):
@@ -56,18 +71,43 @@ def price(s):
   if p>0:return p
  except Exception:pass
  return next((float(x['price']) for x in S['ranking'] if x['symbol']==s),0)
-def close(p,reason):
- ep=p['entry'];xp=price(p['symbol']) or ep;pnl=(xp/ep-1)*p['stake'];S['free']+=p['stake'];S['bot']+=pnl if S['reinvest'] else 0;S['account']+=pnl if not S['reinvest'] else 0;S['realized']+=pnl;S['session_realized']+=pnl;S['session_trades']+=1;S['closed'].insert(0,dict(p,exit=xp,pnl=pnl,reason=reason,closed_at=now()));S['closed']=S['closed'][:100];S['orders'].insert(0,{'time':now(),'symbol':p['symbol'],'side':'SELL','price':xp,'pnl':pnl,'reason':reason});S['positions'].remove(p)
-def open_pos(i,s):
- if not s or S['free']<=0:return
- ep=price(s);n=sum(1 for x in S['slots'] if x)
- if ep<=0 or not n:return
+async def close(p,reason):
+ if S['mode']=='BINANCE_TEST':
+  r=await B.market_sell(p['symbol'],p['qty']);status=r.get('status','')
+  if status!='FILLED':raise RuntimeError(f'Binance SELL not filled: {status or r}')
+  xp=float(r.get('cummulativeQuoteQty') or 0)/float(r.get('executedQty') or p['qty']);proceeds=float(r.get('cummulativeQuoteQty') or 0);pnl=proceeds-p['stake'];S['free']+=proceeds;S['bot']=S['free']+sum(float(x['stake']) for x in S['positions'] if x is not p);S['orders'].insert(0,{'time':now(),'symbol':p['symbol'],'side':'SELL','status':status,'price':xp,'qty':p['qty'],'order_id':r.get('orderId'),'pnl':pnl,'reason':reason})
+ else:
+  ep=p['entry'];xp=price(p['symbol']) or ep;pnl=(xp/ep-1)*p['stake'];S['free']+=p['stake'];S['bot']+=pnl if S['reinvest'] else 0;S['account']+=pnl if not S['reinvest'] else 0;S['orders'].insert(0,{'time':now(),'symbol':p['symbol'],'side':'SELL','price':xp,'pnl':pnl,'reason':reason})
+ S['realized']+=pnl;S['session_realized']+=pnl;S['session_trades']+=1;S['closed'].insert(0,dict(p,exit=xp,pnl=pnl,reason=reason,closed_at=now()));S['closed']=S['closed'][:100];S['positions'].remove(p)
+async def open_pos(i,s):
+ if not s:return
+ n=sum(1 for x in S['slots'] if x)
+ if not n:return
+ if S['mode']=='BINANCE_TEST':
+  if S['free']<=0:return
+  stake=S['free']/n
+  if stake<=0:return
+  try:
+   r=await B.market_buy(s,stake);status=r.get('status','')
+   if status!='FILLED':raise RuntimeError(f'Binance BUY not filled: {status or r}')
+   qty=float(r.get('executedQty') or 0);spent=float(r.get('cummulativeQuoteQty') or 0)
+   if qty<=0 or spent<=0:raise RuntimeError(f'Binance BUY returned empty fill: {r}')
+   ep=spent/qty;S['free']-=spent;p={'id':f"B{r.get('orderId',int(time.time()*1000))}",'slot':i,'symbol':s,'tf':TF,'entry':ep,'current':ep,'stake':spent,'qty':qty,'opened':time.time(),'opened_at':now(),'order_id':r.get('orderId')};S['positions'].append(p);S['bot']=S['free']+sum(float(x['stake']) for x in S['positions']);S['orders'].insert(0,{'time':now(),'symbol':s,'side':'BUY','status':status,'price':ep,'qty':qty,'stake':spent,'order_id':r.get('orderId'),'slot':i})
+  except Exception as e:S['error']=f'Binance BUY {s}: {type(e).__name__}: {e}'
+  return
+ if S['free']<=0:return
+ ep=price(s)
+ if ep<=0:return
  stake=min(S['free'],max(1.0,S['bot']/n));S['free']-=stake;p={'id':f'P{int(time.time()*1000)}','slot':i,'symbol':s,'tf':TF,'entry':ep,'current':ep,'stake':stake,'opened':time.time(),'opened_at':now()};S['positions'].append(p);S['orders'].insert(0,{'time':now(),'symbol':s,'side':'BUY','status':'PAPER_FILLED','price':ep,'slot':i})
 async def manage():
  for p in list(S['positions']):
   p['current']=price(p['symbol']) or p['current'];live=(p['current']/p['entry']-1)*100
-  if S['profit']>0 and live>=S['profit']:close(p,'PROFIT_TARGET')
-  elif time.time()-p['opened']>=MAX_AGE:close(p,'TIMEOUT')
+  if S['profit']>0 and live>=S['profit']:
+   try:await close(p,'PROFIT_TARGET')
+   except Exception as e:S['error']=f'Close {p["symbol"]}: {type(e).__name__}: {e}'
+  elif time.time()-p['opened']>=MAX_AGE:
+   try:await close(p,'TIMEOUT')
+   except Exception as e:S['error']=f'Close {p["symbol"]}: {type(e).__name__}: {e}'
 async def engine():
  while True:
   try:
@@ -75,7 +115,7 @@ async def engine():
    if S['running']:
     S['cycle']+=1;await radar()
     for i,s in enumerate(S['slots']):
-     if s and not any(p['slot']==i for p in S['positions']):open_pos(i,s)
+     if s and not any(p['slot']==i for p in S['positions']):await open_pos(i,s)
    await asyncio.sleep(1)
   except Exception as e:S['error']=f'Engine: {type(e).__name__}: {e}';await asyncio.sleep(1)
 app=FastAPI(title='Fast Scalper Beta '+VERSION)
@@ -93,13 +133,24 @@ async def state():
 @app.post('/api/paper/start')
 async def start(b:Start):
  if S['positions']:raise HTTPException(400,'Close current positions before a new session')
- if S['mode']!='PAPER':raise HTTPException(403,'Beta trading remains PAPER; Binance TEST is connection/account validation only')
- S.update(profit=b.profit_pct,reinvest=b.reinvest,running=True,started=now(),session_started=now(),session_elapsed=0.0,session_realized=0.0,session_trades=0,error=None);S['day_started']=S['day_started'] or now();return await state()
+ if S['mode']=='PAPER':
+  S.update(profit=b.profit_pct,reinvest=b.reinvest,running=True,started=now(),session_started=now(),session_elapsed=0.0,session_realized=0.0,session_trades=0,error=None);S['day_started']=S['day_started'] or now();return await state()
+ if S['mode']=='BINANCE_TEST':
+  if not B.configured:raise HTTPException(400,'Binance API credentials are not configured')
+  if not B.testnet:raise HTTPException(403,'BINANCE_TEST requires Binance Testnet')
+  try:
+   await B.ping();acc=await B.account();free_usdt=next((float(x['free']) for x in acc.get('balances',[]) if x.get('asset')=='USDT'),0.0)
+   if free_usdt<=0:raise RuntimeError('No free USDT on Binance Testnet account')
+   S.update(profit=b.profit_pct,reinvest=b.reinvest,running=True,started=now(),session_started=now(),session_elapsed=0.0,session_realized=0.0,session_trades=0,error=None);S['day_started']=S['day_started'] or now();S['account']=0.0;S['bot']=free_usdt;S['free']=free_usdt;return await state()
+  except Exception as e:raise HTTPException(400,f'Binance TEST start failed: {type(e).__name__}: {e}')
+ raise HTTPException(403,'Unsupported trading mode')
 @app.post('/api/paper/stop')
 async def stop():S['running']=False;return await state()
 @app.post('/api/paper/emergency')
 async def emergency():
- for p in list(S['positions']):close(p,'EMERGENCY_STOP')
+ for p in list(S['positions']):
+  try:await close(p,'EMERGENCY_STOP')
+  except Exception as e:S['error']=f'Close {p["symbol"]}: {type(e).__name__}: {e}'
  S['running']=False;S['session_started']=None;return await state()
 @app.post('/api/reset')
 async def reset():
@@ -120,7 +171,9 @@ async def slots(b:Slots):
  for i in range(MAX_SLOTS):
   if old[i] and old[i]!=new[i]:
    for p in list(S['positions']):
-    if p['slot']==i:close(p,'MANUAL_REMOVE')
+    if p['slot']==i:
+     try:await close(p,'MANUAL_REMOVE')
+     except Exception as e:S['error']=f'Close {p["symbol"]}: {type(e).__name__}: {e}'
  S['slots']=new;S['profit']=b.profit_pct;S['reinvest']=b.reinvest;return await state()
 @app.post('/api/slots/auto-top6')
 async def auto_top6(b:Slots):
@@ -130,6 +183,14 @@ async def mode(b:Mode):
  m=b.mode.upper()
  if m not in {'PAPER','BINANCE_TEST'}:raise HTTPException(403,'Only PAPER and BINANCE_TEST are enabled in Beta 0.01')
  if S['running'] or S['positions']:raise HTTPException(400,'STOP and close positions before changing mode')
+ if m=='BINANCE_TEST':
+  if not B.testnet:raise HTTPException(403,'BINANCE_TEST requires Binance Testnet')
+  try:
+   await B.ping();acc=await B.account();free_usdt=next((float(x['free']) for x in acc.get('balances',[]) if x.get('asset')=='USDT'),0.0)
+   S['account']=0.0;S['bot']=free_usdt;S['free']=free_usdt
+  except Exception as e:raise HTTPException(400,f'Binance TEST mode failed: {type(e).__name__}: {e}')
+ else:
+  S['account']=START;S['bot']=0.0;S['free']=0.0
  S['mode']=m;return await state()
 @app.post('/api/binance/test')
 async def binance_test():
@@ -138,4 +199,4 @@ async def binance_test():
   await B.ping();acc=await B.account();return {'ok':True,'testnet':B.testnet,'configured':B.configured,'account_checked':bool(acc),'balances':acc.get('balances',[]),'diagnostics':diag}
  except Exception as e:raise HTTPException(400,f'Binance connection failed: {type(e).__name__}: {e} | DIAGNOSTICS: {diag}')
 
-HTML="""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><title>Fast Scalper Beta</title><style>*{box-sizing:border-box}body{margin:0;background:#080e1b;color:#eef3ff;font-family:system-ui}.w{max-width:900px;margin:auto;padding:14px}.title{font-size:30px;font-weight:900}.muted{color:#8b97ae}.card{background:#121a2c;border:1px solid #293650;border-radius:16px;padding:14px;margin:10px 0}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.stat{background:#0d1425;border-radius:10px;padding:10px}.v{font-size:19px;font-weight:850}.row{display:flex;gap:8px;flex-wrap:wrap}.input,.select,.slot{background:#0b1322;color:#fff;border:1px solid #30405f;border-radius:9px;padding:10px;flex:1;min-width:120px}.btn{border:0;border-radius:10px;padding:11px 15px;color:#fff;font-weight:850;background:#273650}.on{background:#078b53}.stop{background:#a72e3f}.test{background:#183b66}.grid6{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.rank{display:grid;grid-template-columns:22px 1fr 65px 50px;gap:5px;padding:5px;border-bottom:1px solid #24314a;font-size:9px}.line{font-size:12px;padding:4px 0;border-bottom:1px solid #24314a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}@media(max-width:650px){.stats{grid-template-columns:repeat(2,1fr)}.grid6{grid-template-columns:repeat(2,1fr)}}</style></head><body><div class='w'><div class='title'>⚡ Fast Scalper Beta</div><div class='muted'>Version 0.01 REPAIR PAPER · Trading TF: 3m</div><div class='card'><div class='stats'><div class='stat'>Mode<div class='v' id='mode'>PAPER</div></div><div class='stat'>Bot Balance<div class='v' id='bot'>—</div></div><div class='stat'>Session PnL<div class='v' id='sp'>—</div></div><div class='stat'>Live DELTA<div class='v' id='delta'>—</div></div></div><div class='row' style='margin-top:10px'><select id='modeSel' class='select'><option>PAPER</option><option>BINANCE_TEST</option></select><button class='btn test' onclick='setMode()'>SET MODE</button><button class='btn test' onclick='bt()'>TEST BINANCE</button></div><div id='msg' class='muted'>Binance TEST does not place trades.</div></div><div class='card'><div class='row'><input id='profit' class='input' type='number' step='0.01' value='0.41'><label style='padding:10px'><input id='reinvest' type='checkbox' checked> Reinvest</label></div><div class='row' style='margin-top:8px'><button class='btn on' onclick='start()'>BOT ON · ACTIVE</button><button class='btn stop' onclick='emergency()'>EMERGENCY</button><button class='btn' onclick='reset()'>RESET</button><button class='btn stop' onclick='stop()'>BOT OFF</button><span class='muted' id='tim'>SESSION 00:00 · 24H 00:00</span></div></div><div class='card'><h2>Slots · TOP-6</h2><div class='grid6' id='slots'></div><div class='row' style='margin-top:10px'><button class='btn on' onclick='setPairs()'>SET PAIRS</button><button class='btn' onclick='top6()'>AUTO TOP-6</button></div><div class='muted'>AUTO TOP-6 is one-shot. SET PAIRS can replace or clear slots afterward. Radar never forces slots.</div></div><div class='card'><details open><summary>Radar · TOP-15 · recommended pairs</summary><div id='radar'></div></details></div><div class='card'><h2>Open Positions</h2><div id='pos' class='muted'>No open positions</div></div><div class='card'><h2>Closed Trades — latest 5</h2><div id='closed' class='muted'>No closed trades</div></div><div class='card'><div class='muted'>Health: <span id='health'>—</span> · <span id='err'></span></div></div></div><script>let s={};const $=x=>document.getElementById(x),P=()=>+$('profit').value||0,R=()=>$('reinvest').checked;async function api(p,m='GET',b){let r=await fetch(p,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):null}),j=await r.json();if(!r.ok)throw Error(j.detail||JSON.stringify(j));return j}async function start(){try{await api('/api/paper/start','POST',{profit_pct:P(),reinvest:R()})}catch(e){alert(e.message)}}async function stop(){try{await api('/api/paper/stop','POST')}catch(e){alert(e.message)}}async function emergency(){try{await api('/api/paper/emergency','POST')}catch(e){alert(e.message)}}async function reset(){try{await api('/api/reset','POST')}catch(e){alert(e.message)}}async function setMode(){try{await api('/api/mode','POST',{mode:$('modeSel').value});load()}catch(e){alert(e.message)}}async function bt(){try{let x=await api('/api/binance/test','POST');$('msg').textContent=x.account_checked?'Binance TEST signed account check OK':'Binance public ping OK; credentials not configured'}catch(e){$('msg').textContent=e.message}}function slots(){ $('slots').innerHTML=Array.from({length:6},(_,i)=>`<input class='slot' id='s${i}' placeholder='USDT pair' value='${(s.slots||[])[i]||''}'>`).join('')}async function setPairs(){try{let a=Array.from({length:6},(_,i)=>$('s'+i).value).filter(Boolean);await api('/api/slots','POST',{slots:a,profit_pct:P(),reinvest:R()})}catch(e){alert(e.message)}}async function top6(){try{await api('/api/slots/auto-top6','POST',{slots:[],profit_pct:P(),reinvest:R()})}catch(e){alert(e.message)}}function f(x){return (+x||0).toFixed(4)}function clock(x){x=Math.floor(x||0);return String(Math.floor(x/60)).padStart(2,'0')+':'+String(x%60).padStart(2,'0')}function render(){ $('mode').textContent=s.mode;$('modeSel').value=s.mode;$('bot').textContent=f(s.bot_balance);$('sp').textContent=f(s.session_realized);let p=s.positions||[];$('delta').textContent=p.length?f((p[0].current/p[0].entry-1)*100)+'%':'—';$('tim').textContent='SESSION '+clock(s.session_age)+' · 24H '+clock(s.day_age);$('health').textContent=s.running?'RUNNING':'STOPPED';$('err').textContent=s.error||'OK';$('pos').innerHTML=p.length?p.map(x=>`<div class='line'>${x.symbol} · ${f(x.stake)} USDT · ${f(x.current)}</div>`).join(''):'No open positions';$('closed').innerHTML=(s.closed||[]).slice(0,5).map(x=>`<div class='line'>${x.symbol} · ${x.reason} · ${f(x.pnl)} USDT · ${f(x.exit)}</div>`).join('')||'No closed trades';$('radar').innerHTML=(s.ranking||[]).map((x,i)=>`<div class='rank'><b>${i+1}</b><b>${x.symbol}</b><span>${f(x.price)}</span><span>${f(x.score)}</span></div>`).join('')}async function load(){try{s=await api('/api/state');slots();render()}catch(e){$('err').textContent=e.message}}slots();load();setInterval(load,1000)</script></body></html>"""
+HTML="""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><title>Fast Scalper Beta</title><style>*{box-sizing:border-box}body{margin:0;background:#080e1b;color:#eef3ff;font-family:system-ui}.w{max-width:900px;margin:auto;padding:14px}.title{font-size:30px;font-weight:900}.muted{color:#8b97ae}.card{background:#121a2c;border:1px solid #293650;border-radius:16px;padding:14px;margin:10px 0}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.stat{background:#0d1425;border-radius:10px;padding:10px}.v{font-size:19px;font-weight:850}.row{display:flex;gap:8px;flex-wrap:wrap}.input,.select,.slot{background:#0b1322;color:#fff;border:1px solid #30405f;border-radius:9px;padding:10px;flex:1;min-width:120px}.btn{border:0;border-radius:10px;padding:11px 15px;color:#fff;font-weight:850;background:#273650}.on{background:#078b53}.stop{background:#a72e3f}.test{background:#183b66}.grid6{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.rank{display:grid;grid-template-columns:22px 1fr 65px 50px;gap:5px;padding:5px;border-bottom:1px solid #24314a;font-size:9px}.line{font-size:12px;padding:4px 0;border-bottom:1px solid #24314a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}@media(max-width:650px){.stats{grid-template-columns:repeat(2,1fr)}.grid6{grid-template-columns:repeat(2,1fr)}}</style></head><body><div class='w'><div class='title'>⚡ Fast Scalper Beta</div><div class='muted'>Version 0.01 REPAIR PAPER · Trading TF: 3m</div><div class='card'><div class='stats'><div class='stat'>Mode<div class='v' id='mode'>PAPER</div></div><div class='stat'>Bot Balance<div class='v' id='bot'>—</div></div><div class='stat'>Session PnL<div class='v' id='sp'>—</div></div><div class='stat'>Live DELTA<div class='v' id='delta'>—</div></div></div><div class='row' style='margin-top:10px'><select id='modeSel' class='select'><option>PAPER</option><option>BINANCE_TEST</option></select><button class='btn test' onclick='setMode()'>SET MODE</button><button class='btn test' onclick='bt()'>TEST BINANCE</button></div><div id='msg' class='muted'>Binance TEST can place Testnet trades.</div></div><div class='card'><div class='row'><input id='profit' class='input' type='number' step='0.01' value='0.41'><label style='padding:10px'><input id='reinvest' type='checkbox' checked> Reinvest</label></div><div class='row' style='margin-top:8px'><button class='btn on' onclick='start()'>BOT ON · ACTIVE</button><button class='btn stop' onclick='emergency()'>EMERGENCY</button><button class='btn' onclick='reset()'>RESET</button><button class='btn stop' onclick='stop()'>BOT OFF</button><span class='muted' id='tim'>SESSION 00:00 · 24H 00:00</span></div></div><div class='card'><h2>Slots · TOP-6</h2><div class='grid6' id='slots'></div><div class='row' style='margin-top:10px'><button class='btn on' onclick='setPairs()'>SET PAIRS</button><button class='btn' onclick='top6()'>AUTO TOP-6</button></div><div class='muted'>AUTO TOP-6 is one-shot. SET PAIRS can replace or clear slots afterward. Radar never forces slots.</div></div><div class='card'><details open><summary>Radar · TOP-15 · recommended pairs</summary><div id='radar'></div></details></div><div class='card'><h2>Open Positions</h2><div id='pos' class='muted'>No open positions</div></div><div class='card'><h2>Closed Trades — latest 5</h2><div id='closed' class='muted'>No closed trades</div></div><div class='card'><div class='muted'>Health: <span id='health'>—</span> · <span id='err'></span></div></div></div><script>let s={};const $=x=>document.getElementById(x),P=()=>+$('profit').value||0,R=()=>$('reinvest').checked;async function api(p,m='GET',b){let r=await fetch(p,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):null}),j=await r.json();if(!r.ok)throw Error(j.detail||JSON.stringify(j));return j}async function start(){try{await api('/api/paper/start','POST',{profit_pct:P(),reinvest:R()})}catch(e){alert(e.message)}}async function stop(){try{await api('/api/paper/stop','POST')}catch(e){alert(e.message)}}async function emergency(){try{await api('/api/paper/emergency','POST')}catch(e){alert(e.message)}}async function reset(){try{await api('/api/reset','POST')}catch(e){alert(e.message)}}async function setMode(){try{await api('/api/mode','POST',{mode:$('modeSel').value});load()}catch(e){alert(e.message)}}async function bt(){try{let x=await api('/api/binance/test','POST');$('msg').textContent=x.account_checked?'Binance TEST signed account check OK':'Binance public ping OK; credentials not configured'}catch(e){$('msg').textContent=e.message}}function slots(){ $('slots').innerHTML=Array.from({length:6},(_,i)=>`<input class='slot' id='s${i}' placeholder='USDT pair' value='${(s.slots||[])[i]||''}'>`).join('')}async function setPairs(){try{let a=Array.from({length:6},(_,i)=>$('s'+i).value).filter(Boolean);await api('/api/slots','POST',{slots:a,profit_pct:P(),reinvest:R()})}catch(e){alert(e.message)}}async function top6(){try{await api('/api/slots/auto-top6','POST',{slots:[],profit_pct:P(),reinvest:R()})}catch(e){alert(e.message)}}function f(x){return (+x||0).toFixed(4)}function clock(x){x=Math.floor(x||0);return String(Math.floor(x/60)).padStart(2,'0')+':'+String(x%60).padStart(2,'0')}function render(){ $('mode').textContent=s.mode;$('modeSel').value=s.mode;$('bot').textContent=f(s.bot_balance);$('sp').textContent=f(s.session_realized);let p=s.positions||[];$('delta').textContent=p.length?f((p[0].current/p[0].entry-1)*100)+'%':'—';$('tim').textContent='SESSION '+clock(s.session_age)+' · 24H '+clock(s.day_age);$('health').textContent=s.running?'RUNNING':'STOPPED';$('err').textContent=s.error||'OK';$('pos').innerHTML=p.length?p.map(x=>`<div class='line'>${x.symbol} · ${f(x.stake)} USDT · ${f(x.current)}</div>`).join(''):'No open positions';$('closed').innerHTML=(s.closed||[]).slice(0,5).map(x=>`<div class='line'>${x.symbol} · ${x.reason} · ${f(x.pnl)} USDT · ${f(x.exit)}</div>`).join('')||'No closed trades';$('radar').innerHTML=(s.ranking||[]).map((x,i)=>`<div class='rank'><b>${i+1}</b><b>${x.symbol}</b><span>${f(x.price)}</span><span>${f(x.score)}</span></div>`).join('')}async function load(){try{s=await api('/api/state');slots();render()}catch(e){$('err').textContent=e.message}}slots();load();setInterval(load,1000)</script></body></html>"""
