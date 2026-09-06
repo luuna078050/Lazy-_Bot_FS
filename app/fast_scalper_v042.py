@@ -1,155 +1,53 @@
 from __future__ import annotations
-import asyncio, time
-from datetime import datetime, timezone
-from typing import Any
-import httpx
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
+import time
+from fastapi import HTTPException
+from . import fast_scalper_v042 as base
 
-app=FastAPI(title='Fast Scalper v0.4.2 Repair')
-BASES=['https://data-api.binance.vision','https://api1.binance.com','https://api2.binance.com','https://api3.binance.com','https://api.binance.com']
-UNIVERSE=['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','DOGEUSDT','ADAUSDT','TRXUSDT','LINKUSDT','SUIUSDT','AVAXUSDT','TONUSDT','LTCUSDT','DOTUSDT','ATOMUSDT','NEARUSDT','APTUSDT','ARBUSDT','OPUSDT','FILUSDT']
-TFS=['1m','3m','5m','15m','30m']; TRADING_TF='3m'; MAX_SLOTS=6
-RADAR_INTERVAL=60; DEFAULT_HOLD_SECONDS=180; START_ACCOUNT=1850.0
-S:dict[str,Any]={'running':False,'account':START_ACCOUNT,'bot':0.0,'free':0.0,'realized':0.0,'session_realized':0.0,'session_trades':0,'session_started':None,'positions':[],'closed':[],'orders':[],'ranking':[],'slots':[None]*MAX_SLOTS,'profit':0.0,'reinvest':False,'hold_seconds':DEFAULT_HOLD_SECONDS,'cycle':0,'started':None,'last_radar':0.0,'error':None,'source':None,'prices':{}}
-SEM=asyncio.Semaphore(6); CLIENT:httpx.AsyncClient|None=None
-class Start(BaseModel): profit_pct:float=Field(0,ge=0,le=80); reinvest:bool=False; hold_seconds:int=Field(DEFAULT_HOLD_SECONDS,ge=60,le=180)
-class Slots(BaseModel): slots:list[str]=Field(default_factory=list,max_length=MAX_SLOTS); profit_pct:float=Field(0,ge=0,le=80); reinvest:bool=False; hold_seconds:int=Field(DEFAULT_HOLD_SECONDS,ge=60,le=180)
-class Amount(BaseModel): amount:float=Field(gt=0,le=1_000_000)
-def now(): return datetime.now(timezone.utc).isoformat()
-async def get_json(path,params=None):
-    global CLIENT
-    if CLIENT is None: CLIENT=httpx.AsyncClient(timeout=7,headers={'User-Agent':'FastScalper/1.0'})
-    last=None
-    for base in BASES:
-        try:
-            r=await CLIENT.get(base+path,params=params)
-            if r.status_code in (403,418,429): last=RuntimeError(f'HTTP {r.status_code}'); continue
-            r.raise_for_status(); data=r.json(); S['source']=base; return data
-        except Exception as e: last=e
-    raise last or RuntimeError('No market-data endpoint available')
-def ema(v,n):
-    k=2/(n+1); x=v[0]
-    for z in v[1:]: x=z*k+x*(1-k)
-    return x
-async def analyse(sym,tf):
-    async with SEM: rows=await get_json('/api/v3/klines',{'symbol':sym,'interval':tf,'limit':40})
-    c=[float(x[4]) for x in rows]
-    if len(c)<21: raise RuntimeError('not enough candles')
-    e9,e20=ema(c,9),ema(c,20); mom=(c[-1]/c[-6]-1)*100; trend=(e9/e20-1)*100
-    return {'price':c[-1],'momentum':mom,'trend':trend,'score':max(0,min(100,50+trend*18+mom*7))}
-async def build_ranking():
-    tickers=await get_json('/api/v3/ticker/24hr'); by={x.get('symbol'):x for x in tickers if isinstance(x,dict)}
-    cand=sorted(UNIVERSE,key=lambda s:float(by.get(s,{}).get('quoteVolume') or 0),reverse=True)[:15]
-    async def one(sym):
-        t=by.get(sym,{})
-        rs=await asyncio.gather(*(analyse(sym,tf) for tf in TFS),return_exceptions=True); good=[x for x in rs if isinstance(x,dict)]
-        if not good:return None
-        score=sum(x['score'] for x in good)/len(good); mom=sum(x['momentum'] for x in good)/len(good)
-        sig='BUY' if score>=55 and mom>0 else ('SELL' if score<=45 and mom<0 else 'WAIT')
-        return {'symbol':sym,'price':float(t.get('lastPrice') or good[-1]['price']),'change':float(t.get('priceChangePercent') or 0),'volume':float(t.get('quoteVolume') or 0),'score':round(score,2),'signal':sig,'tf':TRADING_TF}
-    rows=[x for x in await asyncio.gather(*(one(s) for s in cand)) if x]; S['prices']={k:float(v.get('lastPrice') or 0) for k,v in by.items()}; rows.sort(key=lambda x:(x['score'],x['volume']),reverse=True); return rows[:15]
-async def radar(force=False):
-    if not force and S['last_radar'] and time.time()-S['last_radar']<RADAR_INTERVAL:return
-    try:S['ranking']=await build_ranking();S['last_radar']=time.time();S['error']=None
-    except Exception as e:S['error']=f'Radar: {type(e).__name__}: {e}';S['last_radar']=time.time()
-def qprice(sym):
-    q=next((x for x in S['ranking'] if x['symbol']==sym),None); return float(q['price']) if q else float(S.get('prices',{}).get(sym) or 0.0)
-def fill_auto_slots():
-    if any(S['slots']) or not S['ranking']:return
-    picks=[x['symbol'] for x in S['ranking'] if x['signal']=='BUY'][:MAX_SLOTS]
-    if len(picks)<MAX_SLOTS:picks += [x['symbol'] for x in S['ranking'] if x['symbol'] not in picks][:MAX_SLOTS-len(picks)]
-    S['slots']=[{'symbol':picks[i],'tf':TRADING_TF,'auto':True} if i<len(picks) else None for i in range(MAX_SLOTS)]
-def active_slot_count(): return sum(1 for cfg in S['slots'] if cfg and cfg.get('symbol'))
-def close_position(p,reason):
-    ep=p['entry']; xp=qprice(p['symbol']) or p.get('current') or ep; pnl=(xp/ep-1)*p['stake']; S['free']+=p['stake']
-    if S['reinvest']:S['free']+=pnl;S['bot']+=pnl
-    else:S['account']+=pnl
-    S['realized']+=pnl;S['session_realized']+=pnl;S['session_trades']+=1
-    S['closed'].insert(0,dict(p,exit=xp,pnl=pnl,reason=reason,closed_at=now()));S['closed']=S['closed'][:100]
-    S['orders'].insert(0,{'time':now(),'symbol':p['symbol'],'side':'SELL','status':'FILLED','price':xp,'slot':p['slot'],'pnl':pnl,'reason':reason});S['positions'].remove(p)
-def open_position(slot,sym):
-    if not sym or S['free']<=0:return
-    ep=qprice(sym)
-    if ep<=0:return
-    n=active_slot_count()
-    if n<=0:return
-    target=S['bot']/n
-    if target<=0:return
-    stake=min(S['free'],target)
-    if stake<=0:return
-    score=next((x['score'] for x in S['ranking'] if x['symbol']==sym),0);S['free']-=stake
-    p={'id':f'P{int(time.time()*1000)}','slot':slot,'symbol':sym,'tf':TRADING_TF,'entry':ep,'current':ep,'stake':stake,'score':score,'opened':time.time(),'opened_at':now()};S['positions'].append(p);S['orders'].insert(0,{'time':now(),'symbol':sym,'side':'BUY','status':'FILLED','price':ep,'slot':slot,'score':score})
-async def manage_positions():
-    if not S['positions']:return
-    try:
-        ticks=await get_json('/api/v3/ticker/price');latest={x.get('symbol'):float(x.get('price')) for x in ticks if isinstance(x,dict) and x.get('symbol')}
-    except Exception:latest={}
-    for p in list(S['positions']):
-        p['current']=latest.get(p['symbol']) or qprice(p['symbol']) or p['current'];age=time.time()-p['opened'];live=(p['current']/p['entry']-1)*100
-        if S['profit']>0 and live>=S['profit']:close_position(p,'PROFIT_TARGET')
-        elif age>=S['hold_seconds']:close_position(p,'TIMEOUT')
-async def engine():
-    while True:
-        try:
-            await manage_positions()
-            if S['running']:
-                S['cycle']+=1;await radar();fill_auto_slots();await manage_positions()
-                for i,cfg in enumerate(S['slots']):
-                    if cfg and not any(p['slot']==i for p in S['positions']):open_position(i,cfg['symbol'])
-            await asyncio.sleep(1)
-        except Exception as e:S['error']=f'Engine: {type(e).__name__}: {e}';await asyncio.sleep(1)
-@app.on_event('startup')
-async def startup():
-    global CLIENT;CLIENT=httpx.AsyncClient(timeout=7,headers={'User-Agent':'FastScalper/1.0'});asyncio.create_task(engine());asyncio.create_task(radar(True))
-@app.on_event('shutdown')
-async def shutdown():
-    global CLIENT
-    if CLIENT is not None: await CLIENT.aclose();CLIENT=None
-@app.get('/',response_class=HTMLResponse)
-async def home():return HTML
-@app.get('/api/health')
-async def health():return {'ok':True,'worker':'alive','running':S['running'],'cycle':S['cycle'],'positions':len(S['positions']),'radar_ok':bool(S['ranking']),'source':S['source'],'error':S['error']}
-@app.get('/api/state')
-async def state():
-    unreal=sum((p['current']/p['entry']-1)*p['stake'] for p in S['positions']);session_age=int(time.time()-datetime.fromisoformat(S['session_started']).timestamp()) if S['session_started'] else 0
-    return {'running':S['running'],'account':S['account'],'account_free':S['account'],'bot_balance':S['bot'],'free':S['free'],'realized':S['realized'],'session_realized':S['session_realized'],'session_trades':S['session_trades'],'unrealized':unreal,'net':S['realized']+unreal,'total_equity':S['account']+S['bot']+unreal,'withdraw_available':S['free'] if not S['running'] and not S['positions'] else 0.0,'positions':[dict(p) for p in S['positions']],'closed':S['closed'][:20],'orders':S['orders'][:20],'ranking':S['ranking'],'slots':S['slots'],'profit_pct':S['profit'],'reinvest':S['reinvest'],'hold_seconds':S['hold_seconds'],'cycle':S['cycle'],'started':S['started'],'session_started':S['session_started'],'session_age':session_age,'radar_age':int(time.time()-S['last_radar']) if S['last_radar'] else 0,'error':S['error'],'source':S['source']}
-@app.post('/api/paper/start')
-async def start(b:Start):
-    if S['positions']:raise HTTPException(400,'Close current positions before a new session')
-    S.update({'profit':b.profit_pct,'reinvest':b.reinvest,'hold_seconds':b.hold_seconds,'running':True,'started':now(),'session_started':now(),'session_realized':0.0,'session_trades':0,'error':None});fill_auto_slots();return await state()
-@app.post('/api/paper/stop')
-async def stop():S['running']=False;return await state()
-@app.post('/api/paper/emergency')
-async def emergency():
-    for p in list(S['positions']):close_position(p,'EMERGENCY_STOP')
-    S['running']=False;S['started']=None;return await state()
-@app.post('/api/reset')
-async def reset():
-    S.update({'running':False,'account':START_ACCOUNT,'bot':0.0,'free':0.0,'realized':0.0,'session_realized':0.0,'session_trades':0,'session_started':None,'positions':[],'closed':[],'orders':[],'ranking':[],'slots':[None]*MAX_SLOTS,'profit':0.0,'reinvest':False,'hold_seconds':DEFAULT_HOLD_SECONDS,'cycle':0,'started':None,'last_radar':0.0,'error':None,'prices':{}});await radar(True);return await state()
-@app.post('/api/slots')
-async def slots(b:Slots):
-    clean=[x.upper().replace('/','') for x in b.slots if x.strip()]
-    if len(clean)>MAX_SLOTS:raise HTTPException(400,f'Maximum {MAX_SLOTS} pairs')
-    if clean:
-        try:
-            tickers=await get_json('/api/v3/ticker/24hr');valid={x.get('symbol') for x in tickers if isinstance(x,dict)};bad=[x for x in clean if x not in valid]
-            if bad:raise HTTPException(400,'Unknown Binance pairs: '+','.join(bad))
-        except HTTPException:raise
-        except Exception as e:raise HTTPException(503,'Cannot validate pairs: '+str(e))
-    if S['positions']:raise HTTPException(400,'Close current positions before changing slots')
-    S['slots']=[{'symbol':clean[i],'tf':TRADING_TF,'auto':False} if i<len(clean) else None for i in range(MAX_SLOTS)];S['profit']=b.profit_pct;S['reinvest']=b.reinvest;S['hold_seconds']=b.hold_seconds;return await state()
-@app.post('/api/strategy/allocate')
-async def allocate(b:Amount):
-    if S['running'] or S['positions']:raise HTTPException(400,'Allocation only after STOP and all positions are closed')
-    total=S['account']+S['bot'];amount=float(b.amount)
-    if amount>total+1e-9:raise HTTPException(400,'Insufficient capital')
-    S['account']=total-amount;S['bot']=amount;S['free']=amount;return await state()
-@app.post('/api/strategy/withdraw')
-async def withdraw(b:Amount):
-    if S['running'] or S['positions']:raise HTTPException(400,'Withdraw only after STOP and all positions are closed')
-    amount=float(b.amount)
-    if amount>S['free']+1e-9:raise HTTPException(400,f'Available: {S["free"]:.4f} USDT')
-    S['bot']-=amount;S['free']-=amount;S['account']+=amount;return await state()
-HTML='''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Fast Scalper</title><style>*{box-sizing:border-box}body{margin:0;background:#080e1b;color:#eef3ff;font-family:system-ui;font-size:14px}.w{max-width:900px;margin:auto;padding:10px}.title{font-size:24px;font-weight:900}.muted{color:#8b97ae;font-size:12px}.card{background:#121a2c;border:1px solid #293650;border-radius:12px;padding:10px;margin:7px 0}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}.stat{background:#0d1425;border-radius:8px;padding:7px}.v{font-size:16px;font-weight:850}.row{display:flex;gap:6px;flex-wrap:wrap}.input{background:#0b1322;color:#fff;border:1px solid #30405f;border-radius:8px;padding:8px;flex:1;min-width:110px;font-size:13px}.btn{border:0;border-radius:8px;padding:8px 11px;color:#fff;font-weight:850;background:#273650;font-size:12px}.on{background:#078b53}.stop{background:#a72e3f}.grid6{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}.rank{display:grid;grid-template-columns:24px 1fr 70px 58px 54px;gap:5px;align-items:center;padding:6px;border-bottom:1px solid #24314a;font-size:12px}.badge{border-radius:6px;padding:2px 4px;text-align:center;background:#08764e}.good{color:#40df8b}.bad{color:#ff6576}.timer{font-size:15px;font-weight:900;margin-left:auto;padding:8px 11px;border:1px solid #30405f;border-radius:8px;background:#0d1425}h3{font-size:15px;margin:0 0 7px}details summary{cursor:pointer;font-weight:850;font-size:13px}.posrow{padding:5px 0;border-bottom:1px solid #24314a;font-size:12px}@media(max-width:650px){.stats{grid-template-columns:repeat(2,1fr)}.grid6{grid-template-columns:repeat(2,1fr)}.rank{grid-template-columns:22px 1fr 58px 50px 48px;font-size:11px}.timer{margin-left:0;text-align:center}.title{font-size:21px}}</style></head><body><div class="w"><div class="title">⚡ Fast Scalper</div><div class="muted">v0.4.2 REPAIR · Multi-TF 1m · 3m · 5m · 15m · 30m · Trading TF: 3m · PAPER</div><div class="card"><div class="stats"><div class="stat">Account Balance<div class="v" id="a">—</div></div><div class="stat">Realized PnL<div class="v" id="r">—</div></div><div class="stat">Session PnL<div class="v" id="sr">—</div></div><div class="stat">Bot Balance<div class="v" id="b">—</div></div></div></div><div class="card"><h3>Open Positions</h3><div id="pos"><span class="muted">No open positions</span></div></div><div class="card"><h3>Paper controls</h3><div class="row"><input id="p" class="input" type="number" step=".01" placeholder="Profit %"><select id="hold" class="input" style="flex:0 0 120px"><option value="60">1 min</option><option value="180" selected>3 min</option></select><label class="input" style="flex:0 0 auto;min-width:110px;display:flex;align-items:center;gap:6px"><input id="reinvest" type="checkbox"> Reinvest</label><button class="btn on" onclick="start()">PAPER ON</button><button class="btn stop" onclick="stop()">PAPER OFF</button><button class="btn stop" onclick="emergency()">EMERGENCY</button><button class="btn" onclick="reset()">RESET</button><div class="timer" id="timer">00:00</div></div><div class="muted" style="margin-top:5px">Position hold: 1 or 3 minutes. Profit target closes earlier; otherwise timeout closes at selected time.</div></div><div class="card"><h3>Slots · TOP-6</h3><div class="grid6"><input id="slot0" class="input" placeholder="#1 pair"><input id="slot1" class="input" placeholder="#2 pair"><input id="slot2" class="input" placeholder="#3 pair"><input id="slot3" class="input" placeholder="#4 pair"><input id="slot4" class="input" placeholder="#5 pair"><input id="slot5" class="input" placeholder="#6 pair"></div><div class="row" style="margin-top:7px"><button class="btn on" onclick="setSlots()">SET PAIRS</button><button class="btn" onclick="autoSlots()">AUTO TOP-6</button></div><div class="muted">Manual pairs are accepted even if they are outside Radar. Capital is split proportionally: 1 pair = 100%, 2 = 50/50, 3 = 1/3 each.</div></div><div class="card"><details><summary>Radar · TOP-15 · recommended pairs</summary><div id="radar" style="margin-top:7px">—</div></details></div><div class="card"><h3>Closed Trades — latest 5</h3><div id="closed">—</div></div><div class="card"><h3>Capital</h3><div class="row"><input id="amt" class="input" type="number" step=".01" placeholder="USDT"><button class="btn" onclick="alloc()">SET BOT</button><button class="btn" onclick="withdraw()">WITHDRAW</button></div><div class="muted" id="cap">—</div></div><div class="card"><details><summary>Binance API keys · LIVE only</summary><div class="muted" style="margin:7px 0">PAPER mode does not use these keys. They are stored only in this browser for now.</div><input id="apikey" class="input" placeholder="API Key" autocomplete="off"><input id="apisecret" class="input" style="margin-top:6px" type="password" placeholder="API Secret" autocomplete="off"><div class="row" style="margin-top:6px"><button class="btn" onclick="saveKeys()">SAVE KEYS</button><button class="btn" onclick="clearKeys()">CLEAR</button></div></details></div><div class="card"><details><summary>Status / diagnostics</summary><pre id="diag" class="muted" style="white-space:pre-wrap"></pre></details></div></div><script>const $=id=>document.getElementById(id);let editingSlots=false;function vals(){return [0,1,2,3,4,5].map(i=>$("slot"+i).value.trim().toUpperCase()).filter(Boolean)}async function api(u,o={}){let r=await fetch(u,{headers:{'Content-Type':'application/json'},...o});let j=await r.json();if(!r.ok)throw Error(j.detail||'HTTP '+r.status);return j}function fmtAge(s){let m=Math.floor(s/60),q=s%60;return String(m).padStart(2,'0')+':'+String(q).padStart(2,'0')}async function refresh(){try{let j=await api('/api/state');$('a').textContent=j.account.toFixed(4);$('r').textContent=j.realized.toFixed(4);$('sr').textContent=j.session_realized.toFixed(4);$('b').textContent=j.bot_balance.toFixed(4);$('cap').textContent=`Account free: ${j.account_free.toFixed(4)} · Bot free: ${j.free.toFixed(4)} · Total equity: ${j.total_equity.toFixed(4)} · Withdraw available: ${j.withdraw_available.toFixed(4)}`;$('reinvest').checked=j.reinvest;$('hold').value=String(j.hold_seconds||180);if(!editingSlots)j.slots.forEach((x,i)=>$("slot"+i).value=x?x.symbol:'');$('radar').innerHTML=j.ranking.map((x,i)=>`<div class="rank"><b>${i+1}</b><b>${x.symbol}</b><span>${x.price.toFixed(2)}</span><span>${x.score.toFixed(2)}%</span><span class="badge">${x.signal}</span></div>`).join('')||'No radar data';$('pos').innerHTML=j.positions.map(x=>{let age=Math.floor(Date.now()/1000-x.opened);return `<div class="posrow"><b>${x.symbol}</b> · stake ${x.stake.toFixed(4)} · age <b>${fmtAge(age)}</b> · Δ ${((x.current/x.entry-1)*100).toFixed(3)}%</div>`}).join('')||'<span class="muted">No open positions</span>';$('closed').innerHTML=j.closed.slice(0,5).map(x=>`<div class="posrow">${x.symbol} · ${x.reason} · <span class="${x.pnl>=0?'good':'bad'}">${x.pnl.toFixed(4)} USDT</span></div>`).join('')||'—';$('timer').textContent=fmtAge(j.session_age);$('diag').textContent=JSON.stringify({engine:j.running?'ON':'OFF',cycle:j.cycle,positions:j.positions.length,reinvest:j.reinvest,hold_seconds:j.hold_seconds,source:j.source,radar_age:j.radar_age,error:j.error},null,2)}catch(e){$('diag').textContent='UI/API error: '+e.message}}async function start(){try{await api('/api/paper/start',{method:'POST',body:JSON.stringify({profit_pct:parseFloat(($('p').value||'0').replace(',','.')),reinvest:$('reinvest').checked,hold_seconds:parseInt($('hold').value)})});await refresh()}catch(e){alert(e.message)}}async function stop(){try{await api('/api/paper/stop',{method:'POST'});await refresh()}catch(e){alert(e.message)}}async function emergency(){try{await api('/api/paper/emergency',{method:'POST'});await refresh()}catch(e){alert(e.message)}}async function reset(){try{await api('/api/reset',{method:'POST'});await refresh()}catch(e){alert(e.message)}}async function setSlots(){try{editingSlots=false;await api('/api/slots',{method:'POST',body:JSON.stringify({slots:vals(),profit_pct:parseFloat(($('p').value||'0').replace(',','.')),reinvest:$('reinvest').checked,hold_seconds:parseInt($('hold').value)})});await refresh()}catch(e){alert(e.message)}}async function autoSlots(){try{let j=await api('/api/state');let picks=j.ranking.filter(x=>x.signal==='BUY').slice(0,6).map(x=>x.symbol);if(picks.length<6)j.ranking.forEach(x=>{if(picks.length<6&&!picks.includes(x.symbol))picks.push(x.symbol)});[0,1,2,3,4,5].forEach(i=>$("slot"+i).value=picks[i]||'');await setSlots()}catch(e){alert(e.message)}}async function alloc(){try{await api('/api/strategy/allocate',{method:'POST',body:JSON.stringify({amount:parseFloat($('amt').value)})});await refresh()}catch(e){alert(e.message)}}async function withdraw(){try{await api('/api/strategy/withdraw',{method:'POST',body:JSON.stringify({amount:parseFloat($('amt').value)})});await refresh()}catch(e){alert(e.message)}}function saveKeys(){localStorage.setItem('fs_api_key',$('apikey').value);localStorage.setItem('fs_api_secret',$('apisecret').value);alert('API keys saved in this browser. PAPER mode does not use them.')}function clearKeys(){localStorage.removeItem('fs_api_key');localStorage.removeItem('fs_api_secret');$('apikey').value='';$('apisecret').value=''}[0,1,2,3,4,5].forEach(i=>{$("slot"+i).addEventListener('focus',()=>editingSlots=true);$("slot"+i).addEventListener('blur',()=>setTimeout(()=>editingSlots=false,500))});$('apikey').value=localStorage.getItem('fs_api_key')||'';$('apisecret').value=localStorage.getItem('fs_api_secret')||'';$('reinvest').addEventListener('change',async()=>{try{await setSlots()}catch(e){alert(e.message)}});refresh();setInterval(refresh,1000)</script></body></html>'''
+# Keep the proven v0.4.2 engine and patch only the regressions requested for testing.
+base.TRADING_TF = '1m'
+
+def close_position(p, reason):
+    ep = p['entry']
+    xp = p.get('current') or base.qprice(p['symbol']) or ep
+    pnl = (xp / ep - 1) * p['stake']
+    base.S['free'] += p['stake']
+    if base.S['reinvest']:
+        base.S['free'] += pnl
+        base.S['bot'] += pnl
+    else:
+        base.S['account'] += pnl
+    base.S['realized'] += pnl
+    base.S['session_realized'] += pnl
+    base.S['session_trades'] += 1
+    base.S['closed'].insert(0, dict(p, exit=xp, pnl=pnl, reason=reason, closed_at=base.now()))
+    base.S['closed'] = base.S['closed'][:100]
+    base.S['orders'].insert(0, {'time':base.now(),'symbol':p['symbol'],'side':'SELL','status':'FILLED','price':xp,'slot':p['slot'],'pnl':pnl,'reason':reason})
+    base.S['positions'].remove(p)
+
+base.close_position = close_position
+
+# Replace UI strings/handlers without removing the existing controls.
+html = base.HTML
+html = html.replace('Trading TF: 3m', 'Trading TF: 1m')
+html = html.replace("$('hold').value=String(j.hold_seconds||180);", "if(document.activeElement!==$('hold'))$('hold').value=String(j.hold_seconds||180);")
+old_start = "async function start(){try{await api('/api/paper/start',{method:'POST',body:JSON.stringify({profit_pct:parseFloat(($('p').value||'0').replace(',','.')),reinvest:$('reinvest').checked,hold_seconds:parseInt($('hold').value)})});await refresh()}catch(e){alert(e.message)}}"
+new_start = "async function start(){try{let vs=vals();if(vs.length){await api('/api/slots',{method:'POST',body:JSON.stringify({slots:vs,profit_pct:parseFloat(($('p').value||'0').replace(',','.')),reinvest:$('reinvest').checked,hold_seconds:parseInt($('hold').value)})})}await api('/api/paper/start',{method:'POST',body:JSON.stringify({profit_pct:parseFloat(($('p').value||'0').replace(',','.')),reinvest:$('reinvest').checked,hold_seconds:parseInt($('hold').value)})});await refresh()}catch(e){alert(e.message)}}"
+if old_start not in html:
+    raise RuntimeError('start handler pattern not found')
+html = html.replace(old_start, new_start)
+base.HTML = html
+
+# FastAPI routes captured endpoint objects at registration time, so replace the affected endpoint explicitly.
+for route in base.app.routes:
+    if getattr(route, 'path', None) == '/api/paper/start':
+        async def start(b: base.Start):
+            if base.S['positions']:
+                raise HTTPException(400, 'Close current positions before a new session')
+            base.S.update({'profit':b.profit_pct,'reinvest':b.reinvest,'hold_seconds':b.hold_seconds,'running':True,'started':base.now(),'session_started':base.now(),'session_realized':0.0,'session_trades':0,'error':None})
+            base.fill_auto_slots()
+            return await base.state()
+        route.endpoint = start
+        route.dependant.call = start
+        break
+
+app = base.app
