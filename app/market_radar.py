@@ -14,10 +14,12 @@ from typing import Any
 import websocket
 
 STABLE_BASES={"USDT","USDC","FDUSD","USDE","TUSD","DAI","USD1","USDS","EUR"}
+SYMBOLS=("btcusdt","ethusdt","bnbusdt","solusdt","xrpusdt","dogeusdt","adausdt","trxusdt","linkusdt","suiusdt","avaxusdt","tonusdt","ltcusdt","dotusdt","atomusdt","nearusdt","aptusdt","arbusdt","opusdt","filusdt")
+STREAMS="/".join(f"{s}@ticker" for s in SYMBOLS)
 WS_URLS=(
-    "wss://stream.binance.com:9443/stream?streams=!ticker@arr",
-    "wss://stream.binance.com:443/stream?streams=!ticker@arr",
-    "wss://data-stream.binance.vision/stream?streams=!ticker@arr",
+    f"wss://stream.binance.com:9443/stream?streams={STREAMS}",
+    f"wss://stream.binance.com:443/stream?streams={STREAMS}",
+    f"wss://data-stream.binance.vision/stream?streams={STREAMS}",
 )
 
 class MarketRadar:
@@ -56,22 +58,9 @@ class MarketRadar:
                 try:
                     self.url=url
                     self.last_error=None
-                    ws=websocket.WebSocketApp(
-                        url,
-                        on_open=self._on_open,
-                        on_message=self._on_message,
-                        on_error=self._on_error,
-                        on_close=self._on_close,
-                    )
+                    ws=websocket.WebSocketApp(url,on_open=self._on_open,on_message=self._on_message,on_error=self._on_error,on_close=self._on_close)
                     self._ws=ws
-                    ws.run_forever(
-                        ping_interval=20,
-                        ping_timeout=10,
-                        ping_payload="fs",
-                        suppress_origin=True,
-                        http_proxy_host=None,
-                        http_proxy_port=None,
-                    )
+                    ws.run_forever(ping_interval=20,ping_timeout=10,ping_payload="fs",suppress_origin=True,http_proxy_host=None,http_proxy_port=None)
                     if self.last_update>0:
                         got_data=True
                         break
@@ -111,7 +100,7 @@ class MarketRadar:
                 for d in rows:
                     if not isinstance(d,dict): continue
                     s=str(d.get("s","")).upper()
-                    if not s.endswith("USDT") or s[:-4] in STABLE_BASES: continue
+                    if s not in {x.upper() for x in SYMBOLS}: continue
                     try: price=float(d.get("c",0) or 0)
                     except (TypeError,ValueError): continue
                     if price<=0: continue
@@ -147,13 +136,7 @@ class MarketRadar:
             score=100*(.55*momentum+.45*liquidity)
             signal="BUY" if pct>=1 else ("WATCH" if pct>0 else "WAIT")
             target_pct=min(.006,max(.0035,abs(pct)/100*.8))
-            rows.append({
-                "symbol":s[:-4]+"/USDT","price":price,"change_24h_pct":round(pct,3),
-                "quote_volume_24h":vol,"score":round(score,2),"signal":signal,
-                "estimated_entry":price,"estimated_exit":price*(1+target_pct),
-                "estimated_stop":price*(1-.004),"change_3m_pct":0.0,
-                "volume_ratio":1.0,"pump_events":0,"pump_score":round(momentum,3),"hold_seconds":180,
-            })
+            rows.append({"symbol":s[:-4]+"/USDT","price":price,"change_24h_pct":round(pct,3),"quote_volume_24h":vol,"score":round(score,2),"signal":signal,"estimated_entry":price,"estimated_exit":price*(1+target_pct),"estimated_stop":price*(1-.004),"change_3m_pct":0.0,"volume_ratio":1.0,"pump_events":0,"pump_score":round(momentum,3),"hold_seconds":180})
         rows.sort(key=lambda x:(x["score"],x["quote_volume_24h"]),reverse=True)
         return rows[:int(limit)]
 
