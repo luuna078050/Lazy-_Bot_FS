@@ -118,6 +118,12 @@ class MarketRadar:
 
     def snapshot(self,limit=15):
         self.start()
+        deadline=time.time()+8
+        while time.time()<deadline:
+            with self.lock:
+                if self.tickers:
+                    break
+            time.sleep(0.15)
         with self.lock:
             items=list(self.tickers.items())
         items=[(s,d) for s,d in items if s.endswith("USDT") and s[:-4] not in STABLE_BASES]
