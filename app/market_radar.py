@@ -1,7 +1,8 @@
 """Binance market radar for Fast Scalper.
 
-Uses one persistent public Spot WebSocket market-data stream. No REST market
-polling is used by the radar.
+Architecture: one raw public WebSocket connection to Binance, followed by an
+explicit SUBSCRIBE request for the 20 symbols. No REST market polling and no
+combined-stream URL parsing are used by the radar.
 """
 from __future__ import annotations
 
@@ -15,12 +16,8 @@ import websocket
 
 STABLE_BASES={"USDT","USDC","FDUSD","USDE","TUSD","DAI","USD1","USDS","EUR"}
 SYMBOLS=("btcusdt","ethusdt","bnbusdt","solusdt","xrpusdt","dogeusdt","adausdt","trxusdt","linkusdt","suiusdt","avaxusdt","tonusdt","ltcusdt","dotusdt","atomusdt","nearusdt","aptusdt","arbusdt","opusdt","filusdt")
-STREAMS="/".join(f"{s}@ticker" for s in SYMBOLS)
-WS_URLS=(
-    f"wss://stream.binance.com:9443/stream?streams={STREAMS}",
-    f"wss://stream.binance.com:443/stream?streams={STREAMS}",
-    f"wss://data-stream.binance.vision/stream?streams={STREAMS}",
-)
+SUB_PARAMS=[f"{s}@ticker" for s in SYMBOLS]
+WS_URLS=("wss://stream.binance.com:9443/ws","wss://stream.binance.com:443/ws","wss://data-stream.binance.vision/ws")
 
 class MarketRadar:
     def __init__(self,top_n:int=20):
@@ -36,8 +33,7 @@ class MarketRadar:
         self.url=""
 
     def start(self):
-        if self._thread and self._thread.is_alive():
-            return
+        if self._thread and self._thread.is_alive(): return
         self._stop.clear()
         self._thread=threading.Thread(target=self._run,daemon=True,name="fast-scalper-market-radar")
         self._thread.start()
@@ -71,13 +67,19 @@ class MarketRadar:
                 finally:
                     self.connected=False
                     self._ws=None
-            if not self._stop.is_set():
-                time.sleep(1 if got_data else 2)
+            if not self._stop.is_set(): time.sleep(1 if got_data else 2)
 
-    def _on_open(self,_ws):
+    def _on_open(self,ws):
         self.connected=True
         self.last_error=None
-        print(f"[RADAR] connected {self.url}",flush=True)
+        try:
+            ws.send(json.dumps({"method":"SUBSCRIBE","params":SUB_PARAMS,"id":1}))
+            print(f"[RADAR] connected {self.url}; subscribed={len(SUB_PARAMS)}",flush=True)
+        except Exception as exc:
+            self.last_error=f"subscribe: {exc}"[:240]
+            print(f"[RADAR] {self.last_error}",flush=True)
+            try: ws.close()
+            except Exception: pass
 
     def _on_close(self,_ws,code,msg):
         self.connected=False
@@ -93,20 +95,19 @@ class MarketRadar:
     def _on_message(self,_ws,raw):
         try:
             msg=json.loads(raw)
+            if isinstance(msg,dict) and msg.get("result") is None and msg.get("id")==1:
+                print("[RADAR] subscription acknowledged",flush=True)
+                return
             data=msg.get("data",msg) if isinstance(msg,dict) else msg
-            rows=data if isinstance(data,list) else [data]
-            changed=False
+            if not isinstance(data,dict): return
+            s=str(data.get("s","")).upper()
+            if s not in {x.upper() for x in SYMBOLS}: return
+            try: price=float(data.get("c",0) or 0)
+            except (TypeError,ValueError): return
+            if price<=0: return
             with self.lock:
-                for d in rows:
-                    if not isinstance(d,dict): continue
-                    s=str(d.get("s","")).upper()
-                    if s not in {x.upper() for x in SYMBOLS}: continue
-                    try: price=float(d.get("c",0) or 0)
-                    except (TypeError,ValueError): continue
-                    if price<=0: continue
-                    self.tickers[s]=d
-                    changed=True
-                if changed: self.last_update=time.time()
+                self.tickers[s]=data
+                self.last_update=time.time()
         except Exception as exc:
             self.last_error=f"message: {exc}"[:240]
             print(f"[RADAR] {self.last_error}",flush=True)
@@ -118,19 +119,15 @@ class MarketRadar:
             with self.lock:
                 if self.tickers: break
             time.sleep(.15)
-        with self.lock:
-            items=list(self.tickers.items())
+        with self.lock: items=list(self.tickers.items())
         items=[(s,d) for s,d in items if s.endswith("USDT") and s[:-4] not in STABLE_BASES]
         items.sort(key=lambda x:float(x[1].get("q",0) or 0),reverse=True)
         rows=[]
         for s,d in items[:max(1,int(limit))]:
             try:
-                price=float(d.get("c",0) or 0)
-                open_price=float(d.get("o",price) or price)
-                vol=float(d.get("q",0) or 0)
+                price=float(d.get("c",0) or 0); open_price=float(d.get("o",price) or price); vol=float(d.get("q",0) or 0)
                 pct=(price/open_price-1)*100 if price and open_price else 0.0
-            except (TypeError,ValueError,ZeroDivisionError):
-                continue
+            except (TypeError,ValueError,ZeroDivisionError): continue
             liquidity=min(1.0,max(0.0,math.log10(max(vol,1))/10))
             momentum=min(1.0,max(0.0,pct)/10)
             score=100*(.55*momentum+.45*liquidity)
