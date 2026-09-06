@@ -58,63 +58,39 @@ base.open_position = open_position_guarded
 
 
 async def radar(force=False):
-    """Resilient Radar: market snapshot is sufficient for a row; analysis is optional."""
+    """Reliable Radar: one market-data request, no dependency on dozens of klines."""
     if not force and base.S['last_radar'] and time.time() - base.S['last_radar'] < base.RADAR_INTERVAL:
         return
-
     try:
-        # Primary snapshot. This is one request and must not depend on kline analysis.
         try:
             tickers = await base.get_json('/api/v3/ticker/24hr')
             by = {x.get('symbol'): x for x in tickers if isinstance(x, dict) and x.get('symbol')}
-        except Exception as e:
-            # Binance ticker/price fallback keeps prices/trading alive even when 24hr is blocked.
+        except Exception:
             prices = await base.get_json('/api/v3/ticker/price')
             by = {x.get('symbol'): {'symbol': x.get('symbol'), 'lastPrice': x.get('price'), 'quoteVolume': 0, 'priceChangePercent': 0} for x in prices if isinstance(x, dict) and x.get('symbol')}
-            if not by:
-                raise RuntimeError(f'No Binance ticker data: {e}')
+        if not by:
+            raise RuntimeError('No Binance market data')
 
         base.S['prices'] = {k: float(v.get('lastPrice') or 0) for k, v in by.items() if v.get('lastPrice')}
-
-        # Radar searches the configured universe AND every manually entered pair.
         manual = [cfg.get('symbol') for cfg in base.S['slots'] if cfg and cfg.get('symbol')]
-        candidates = list(dict.fromkeys(list(base.UNIVERSE) + manual))
-        candidates = [s for s in candidates if s in by]
-
-        # Prefer high-volume pairs, but never drop a manually entered pair.
         manual_set = set(manual)
-        candidates.sort(key=lambda s: (s in manual_set, float(by.get(s, {}).get('quoteVolume') or 0)), reverse=True)
-        candidates = candidates[:20]
+        universe = list(dict.fromkeys(list(base.UNIVERSE) + manual))
+        rows = []
+        for sym in universe:
+            t = by.get(sym)
+            if not t:
+                continue
+            price = float(t.get('lastPrice') or 0)
+            if price <= 0:
+                continue
+            change = float(t.get('priceChangePercent') or 0)
+            volume = float(t.get('quoteVolume') or 0)
+            score = max(0.0, min(100.0, 50.0 + change * 5.0))
+            signal = 'BUY' if change > 0.10 else ('SELL' if change < -0.10 else 'WAIT')
+            rows.append({'symbol': sym, 'price': price, 'change': change, 'volume': volume, 'score': round(score, 2), 'signal': signal, 'tf': base.TRADING_TF})
 
-        async def one(sym):
-            t = by.get(sym, {})
-            try:
-                rs = await asyncio.gather(*(base.analyse(sym, tf) for tf in base.TFS), return_exceptions=True)
-                good = [x for x in rs if isinstance(x, dict)]
-            except Exception:
-                good = []
-            if good:
-                score = sum(x['score'] for x in good) / len(good)
-                mom = sum(x['momentum'] for x in good) / len(good)
-                price = float(t.get('lastPrice') or good[-1]['price'])
-            else:
-                price = float(t.get('lastPrice') or 0)
-                score = 50.0
-                mom = 0.0
-            sig = 'BUY' if score >= 55 and mom > 0 else ('SELL' if score <= 45 and mom < 0 else 'WAIT')
-            return {
-                'symbol': sym,
-                'price': price,
-                'change': float(t.get('priceChangePercent') or 0),
-                'volume': float(t.get('quoteVolume') or 0),
-                'score': round(score, 2),
-                'signal': sig,
-                'tf': base.TRADING_TF,
-            }
-
-        rows = [x for x in await asyncio.gather(*(one(s) for s in candidates), return_exceptions=True) if isinstance(x, dict) and x.get('price', 0) > 0]
-        # Manual pairs stay visible; other rows are ranked normally.
-        rows.sort(key=lambda x: (x['symbol'] in manual_set, x['score'], x['volume']), reverse=True)
+        # Volume ranks the market; manually entered pairs are always retained and shown first.
+        rows.sort(key=lambda x: (x['symbol'] in manual_set, x['volume'], x['score']), reverse=True)
         base.S['ranking'] = rows[:20]
         base.S['last_radar'] = time.time()
         base.S['error'] = None if rows else 'Radar: no market rows'
@@ -167,9 +143,6 @@ async def slots_manual(b: base.Slots):
         raise HTTPException(400, f'Maximum {base.MAX_SLOTS} pairs')
     if base.S['positions']:
         raise HTTPException(400, 'Close current positions before changing slots')
-
-    # Do not make manual entry depend on the 24hr endpoint.
-    # The Radar will verify/search the pair and populate its live price.
     base.S['slots'] = [
         {'symbol': clean[i], 'tf': base.TRADING_TF, 'auto': False} if i < len(clean) else None
         for i in range(base.MAX_SLOTS)
@@ -194,13 +167,11 @@ async def slots_auto():
     return await base.state()
 
 
-# Replace only the POST handler; the existing HTML/UI is untouched.
 for _route in base.app.routes:
     if getattr(_route, 'path', None) == '/api/slots' and 'POST' in getattr(_route, 'methods', set()):
         _route.endpoint = slots_manual
         _route.dependant = get_dependant(path=_route.path, call=slots_manual)
         break
 
-# Keep the v0.4.2 interface exactly as-is.
 base.HTML = base.HTML
 app = base.app
