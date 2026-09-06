@@ -2,60 +2,47 @@ from __future__ import annotations
 import asyncio, random, time
 from datetime import datetime, timezone
 from typing import Any
-import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
+from .market_radar import RADAR
 
 app=FastAPI(title='Fast Scalper v0.4.2 Repair')
-BASES=['https://data-api.binance.vision','https://api1.binance.com','https://api2.binance.com','https://api3.binance.com','https://api.binance.com']
 UNIVERSE=['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','DOGEUSDT','ADAUSDT','TRXUSDT','LINKUSDT','SUIUSDT','AVAXUSDT','TONUSDT','LTCUSDT','DOTUSDT','ATOMUSDT','NEARUSDT','APTUSDT','ARBUSDT','OPUSDT','FILUSDT']
 TFS=['1m','3m','5m','15m','30m']; TRADING_TF='3m'; MAX_SLOTS=6
 RADAR_INTERVAL=60; ROTATE_SECONDS=60; MAX_POSITION_SECONDS=60; START_ACCOUNT=1850.0
-S:dict[str,Any]={'running':False,'account':START_ACCOUNT,'bot':0.0,'free':0.0,'realized':0.0,'session_realized':0.0,'session_trades':0,'session_started':None,'positions':[],'closed':[],'orders':[],'ranking':[],'slots':[None]*MAX_SLOTS,'profit':0.0,'reinvest':False,'cycle':0,'started':None,'last_radar':0.0,'error':None,'source':None,'prices':{}}
-SEM=asyncio.Semaphore(6); CLIENT:httpx.AsyncClient|None=None
+S:dict[str,Any]={'running':False,'account':START_ACCOUNT,'bot':0.0,'free':0.0,'realized':0.0,'session_realized':0.0,'session_trades':0,'session_started':None,'positions':[],'closed':[],'orders':[],'ranking':[],'slots':[None]*MAX_SLOTS,'profit':0.0,'reinvest':False,'cycle':0,'started':None,'last_radar':0.0,'error':None,'source':'Binance WebSocket','prices':{}}
 class Start(BaseModel): profit_pct:float=Field(0,ge=0,le=80); reinvest:bool=False
 class Slots(BaseModel): slots:list[str]=Field(default_factory=list,max_length=MAX_SLOTS); profit_pct:float=Field(0,ge=0,le=80); reinvest:bool=False
 class Amount(BaseModel): amount:float=Field(gt=0,le=1_000_000)
 def now(): return datetime.now(timezone.utc).isoformat()
-async def get_json(path,params=None):
-    global CLIENT
-    if CLIENT is None: CLIENT=httpx.AsyncClient(timeout=7,headers={'User-Agent':'FastScalper/1.0'})
-    last=None
-    for base in BASES:
-        try:
-            r=await CLIENT.get(base+path,params=params)
-            if r.status_code in (403,418,429): last=RuntimeError(f'HTTP {r.status_code}'); continue
-            r.raise_for_status(); data=r.json(); S['source']=base; return data
-        except Exception as e: last=e
-    raise last or RuntimeError('No market-data endpoint available')
 def ema(v,n):
     k=2/(n+1); x=v[0]
     for z in v[1:]: x=z*k+x*(1-k)
     return x
-async def analyse(sym,tf):
-    async with SEM: rows=await get_json('/api/v3/klines',{'symbol':sym,'interval':tf,'limit':40})
-    c=[float(x[4]) for x in rows]
-    if len(c)<21: raise RuntimeError('not enough candles')
-    e9,e20=ema(c,9),ema(c,20); mom=(c[-1]/c[-6]-1)*100; trend=(e9/e20-1)*100
-    return {'price':c[-1],'momentum':mom,'trend':trend,'score':max(0,min(100,50+trend*18+mom*7))}
 async def build_ranking():
-    tickers=await get_json('/api/v3/ticker/24hr'); by={x.get('symbol'):x for x in tickers if isinstance(x,dict)}
-    cand=sorted(UNIVERSE,key=lambda s:float(by.get(s,{}).get('quoteVolume') or 0),reverse=True)[:15]
-    async def one(sym):
-        t=by.get(sym,{})
-        rs=await asyncio.gather(*(analyse(sym,tf) for tf in TFS),return_exceptions=True); good=[x for x in rs if isinstance(x,dict)]
-        if not good:return None
-        score=sum(x['score'] for x in good)/len(good); mom=sum(x['momentum'] for x in good)/len(good)
-        sig='BUY' if score>=55 and mom>0 else ('SELL' if score<=45 and mom<0 else 'WAIT')
-        return {'symbol':sym,'price':float(t.get('lastPrice') or good[-1]['price']),'change':float(t.get('priceChangePercent') or 0),'volume':float(t.get('quoteVolume') or 0),'score':round(score,2),'signal':sig,'tf':TRADING_TF}
-    rows=[x for x in await asyncio.gather(*(one(s) for s in cand)) if x]; S['prices']={k:float(v.get('lastPrice') or 0) for k,v in by.items()}; rows.sort(key=lambda x:(x['score'],x['volume']),reverse=True); return rows[:15]
+    rows=RADAR.snapshot(15)
+    out=[]
+    for x in rows:
+        sym=str(x.get('symbol','')).replace('/','').upper()
+        if not sym:return
+        out.append({'symbol':sym,'price':float(x.get('price') or 0),'change':float(x.get('change_24h_pct') or 0),'volume':float(x.get('quote_volume_24h') or 0),'score':float(x.get('score') or 0),'signal':x.get('signal','WAIT'),'tf':TRADING_TF})
+    S['prices']={x['symbol']:x['price'] for x in out if x['price']>0}
+    out.sort(key=lambda x:(x['score'],x['volume']),reverse=True)
+    return out[:15]
 async def radar(force=False):
     if not force and S['last_radar'] and time.time()-S['last_radar']<RADAR_INTERVAL:return
-    try:S['ranking']=await build_ranking();S['last_radar']=time.time();S['error']=None
-    except Exception as e:S['error']=f'Radar: {type(e).__name__}: {e}';S['last_radar']=time.time()
+    try:
+        S['ranking']=await build_ranking()
+        S['last_radar']=time.time(); S['error']=None; S['source']='Binance WebSocket'
+        if getattr(RADAR,'last_error',None): S['error']=f'Radar WebSocket: {RADAR.last_error}'
+    except Exception as e:
+        S['error']=f'Radar: {type(e).__name__}: {e}'; S['last_radar']=time.time()
 def qprice(sym):
-    q=next((x for x in S['ranking'] if x['symbol']==sym),None); return float(q['price']) if q else float(S.get('prices',{}).get(sym) or 0.0)
+    q=next((x for x in S['ranking'] if x['symbol']==sym),None)
+    if q and float(q.get('price') or 0)>0:return float(q['price'])
+    try:return float(RADAR.price(sym))
+    except Exception:return float(S.get('prices',{}).get(sym) or 0.0)
 def fill_auto_slots():
     if any(S['slots']) or not S['ranking']:return
     picks=[x['symbol'] for x in S['ranking'] if x['signal']=='BUY'][:MAX_SLOTS]
@@ -76,11 +63,8 @@ def open_position(slot,sym):
     p={'id':f'P{int(time.time()*1000)}','slot':slot,'symbol':sym,'tf':TRADING_TF,'entry':ep,'current':ep,'stake':stake,'score':score,'opened':time.time(),'opened_at':now()};S['positions'].append(p);S['orders'].insert(0,{'time':now(),'symbol':sym,'side':'BUY','status':'FILLED','price':ep,'slot':slot,'score':score})
 async def manage_positions():
     if not S['positions']:return
-    try:
-        ticks=await get_json('/api/v3/ticker/price');latest={x.get('symbol'):float(x.get('price')) for x in ticks if isinstance(x,dict) and x.get('symbol')}
-    except Exception:latest={}
     for p in list(S['positions']):
-        p['current']=latest.get(p['symbol']) or qprice(p['symbol']) or p['current'];age=time.time()-p['opened'];live=(p['current']/p['entry']-1)*100
+        p['current']=qprice(p['symbol']) or p['current'];age=time.time()-p['opened'];live=(p['current']/p['entry']-1)*100
         if S['profit']>0 and live>=S['profit']:close_position(p,'PROFIT_TARGET')
         elif age>=MAX_POSITION_SECONDS:close_position(p,'TIMEOUT')
         elif age>=ROTATE_SECONDS:close_position(p,'ROTATION')
@@ -96,11 +80,9 @@ async def engine():
         except Exception as e:S['error']=f'Engine: {type(e).__name__}: {e}';await asyncio.sleep(1)
 @app.on_event('startup')
 async def startup():
-    global CLIENT;CLIENT=httpx.AsyncClient(timeout=7,headers={'User-Agent':'FastScalper/1.0'});asyncio.create_task(engine());asyncio.create_task(radar(True))
+    RADAR.start(); asyncio.create_task(engine()); asyncio.create_task(radar(True))
 @app.on_event('shutdown')
-async def shutdown():
-    global CLIENT
-    if CLIENT is not None: await CLIENT.aclose();CLIENT=None
+async def shutdown(): RADAR.stop()
 @app.get('/',response_class=HTMLResponse)
 async def home():return HTML
 @app.get('/api/health')
@@ -126,12 +108,8 @@ async def reset():
 async def slots(b:Slots):
     clean=[x.upper().replace('/','') for x in b.slots if x.strip()]
     if len(clean)>MAX_SLOTS:raise HTTPException(400,f'Maximum {MAX_SLOTS} pairs')
-    if clean:
-        try:
-            tickers=await get_json('/api/v3/ticker/24hr');valid={x.get('symbol') for x in tickers if isinstance(x,dict)};bad=[x for x in clean if x not in valid]
-            if bad:raise HTTPException(400,'Unknown Binance pairs: '+','.join(bad))
-        except HTTPException:raise
-        except Exception as e:raise HTTPException(503,'Cannot validate pairs: '+str(e))
+    bad=[x for x in clean if not x.endswith('USDT') or len(x)<=4]
+    if bad:raise HTTPException(400,'Unknown Binance pairs: '+','.join(bad))
     if S['positions']:raise HTTPException(400,'Close current positions before changing slots')
     S['slots']=[{'symbol':clean[i],'tf':TRADING_TF,'auto':False} if i<len(clean) else None for i in range(MAX_SLOTS)];S['profit']=b.profit_pct;S['reinvest']=b.reinvest;return await state()
 @app.post('/api/strategy/allocate')
