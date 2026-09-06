@@ -7,7 +7,6 @@ from . import fast_scalper_v042_base as base
 base.TRADING_TF = '1m'
 base.DEFAULT_HOLD_SECONDS = 60
 base.S['hold_seconds'] = 60
-# Pydantic v2 keeps the field default in model_fields; update it so omitted values are 1 minute.
 base.Start.model_fields['hold_seconds'].default = 60
 base.Slots.model_fields['hold_seconds'].default = 60
 
@@ -37,8 +36,7 @@ def fill_auto_slots_disabled():
     return None
 base.fill_auto_slots = fill_auto_slots_disabled
 
-# If Binance is temporarily unavailable, keep retrying the radar instead of marking the
-# failed attempt as a successful 60-second cycle. This makes Radar recover automatically.
+# Retry Radar after failures instead of waiting a full minute.
 async def radar(force=False):
     if not force and base.S['last_radar'] and time.time()-base.S['last_radar'] < base.RADAR_INTERVAL:
         return
@@ -49,17 +47,36 @@ async def radar(force=False):
             base.S['error'] = None
         else:
             base.S['error'] = 'Radar: no ranking data'
-            base.S['last_radar'] = time.time() - base.RADAR_INTERVAL + 5
+            base.S['last_radar'] = time.time()-base.RADAR_INTERVAL+5
     except Exception as e:
         base.S['error'] = f'Radar: {type(e).__name__}: {e}'
-        base.S['last_radar'] = time.time() - base.RADAR_INTERVAL + 5
+        base.S['last_radar'] = time.time()-base.RADAR_INTERVAL+5
 
 base.radar = radar
+
+app = base.app
+
+# Dedicated hold-duration endpoint: changing the selector immediately updates the engine.
+@app.post('/api/hold')
+async def set_hold(body: dict):
+    try:
+        hold = int(body.get('hold_seconds'))
+    except Exception:
+        raise base.HTTPException(400, 'hold_seconds must be 60 or 180')
+    if hold not in (60, 180):
+        raise base.HTTPException(400, 'hold_seconds must be 60 or 180')
+    base.S['hold_seconds'] = hold
+    return await base.state()
 
 html = base.HTML
 html = html.replace('Trading TF: 3m', 'Trading TF: 1m')
 html = html.replace('<option value="60">1 min</option><option value="180" selected>3 min</option>', '<option value="60" selected>1 min</option><option value="180">3 min</option>')
 html = html.replace("$('hold').value=String(j.hold_seconds||180);", "if(document.activeElement!==$('hold'))$('hold').value=String(j.hold_seconds||60);")
+html = html.replace('id="hold"', 'id="hold" onchange="holdChanged()"')
+hold_marker = "async function start(){"
+hold_handler = "async function holdChanged(){try{await api('/api/hold',{method:'POST',body:JSON.stringify({hold_seconds:parseInt($('hold').value)})});await refresh()}catch(e){alert(e.message)}}\n"
+if hold_handler not in html:
+    html = html.replace(hold_marker, hold_handler + hold_marker, 1)
 old_start = "async function start(){try{await api('/api/paper/start',{method:'POST',body:JSON.stringify({profit_pct:parseFloat(($('p').value||'0').replace(',','.')),reinvest:$('reinvest').checked,hold_seconds:parseInt($('hold').value)})});await refresh()}catch(e){alert(e.message)}}"
 new_start = "async function start(){try{await api('/api/slots',{method:'POST',body:JSON.stringify({slots:vals(),profit_pct:parseFloat(($('p').value||'0').replace(',','.')),reinvest:$('reinvest').checked,hold_seconds:parseInt($('hold').value)})});await api('/api/paper/start',{method:'POST',body:JSON.stringify({profit_pct:parseFloat(($('p').value||'0').replace(',','.')),reinvest:$('reinvest').checked,hold_seconds:parseInt($('hold').value)})});await refresh()}catch(e){alert(e.message)}}"
 if old_start not in html:
