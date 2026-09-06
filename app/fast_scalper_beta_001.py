@@ -27,7 +27,13 @@ class Binance:
   async with httpx.AsyncClient(timeout=8) as c:r=await c.get(self.base+'/v3/ping');r.raise_for_status()
  async def account(self):
   p=self.sign({})
-  async with httpx.AsyncClient(timeout=8) as c:r=await c.get(self.base+'/v3/account',params=p,headers={'X-MBX-APIKEY':self.key});r.raise_for_status();return r.json()
+  async with httpx.AsyncClient(timeout=8) as c:
+   r=await c.get(self.base+'/v3/account',params=p,headers={'X-MBX-APIKEY':self.key})
+  if r.status_code>=400:
+   try: body=r.json()
+   except Exception: body=r.text[:500]
+   raise RuntimeError(f'Binance HTTP {r.status_code}: {body}')
+  return r.json()
 B=Binance()
 
 async def radar(force=False):
