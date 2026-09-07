@@ -12,6 +12,8 @@ async def mode_fixed(b: legacy.Mode):
         raise HTTPException(403, 'Unsupported mode')
     if S['running'] or S['positions']:
         raise HTTPException(400, 'BOT OFF and no open positions required')
+    if m == 'BINANCE_TEST' and not B.testnet:
+        raise HTTPException(403, 'BINANCE_TEST requires Binance Testnet')
     S['mode'] = m
     S['bot'] = 0.0
     S['free'] = 0.0
@@ -22,14 +24,6 @@ async def mode_fixed(b: legacy.Mode):
     else:
         S['account'] = 0.0
         S['reserve'] = 0.0
-        try:
-            await B.ping()
-            a = await B.account()
-            u = next((float(x['free']) for x in a.get('balances', []) if x.get('asset') == 'USDT'), 0.0)
-            S['account'] = u
-            S['reserve'] = u
-        except Exception as e:
-            S['error'] = f'Binance TEST: {e}'
     return await legacy.state()
 
 for r in app.router.routes:
