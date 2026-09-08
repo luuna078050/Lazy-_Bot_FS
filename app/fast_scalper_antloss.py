@@ -2,7 +2,7 @@ from . import fast_scalper_beta_001_legacy as legacy
 import asyncio
 import time
 
-# PAPER close must use the exact price that triggered the decision.
+# PAPER close must use the exact market snapshot that triggered the decision.
 async def _close_at_snapshot(p, reason, snapshot):
     if legacy.S.get('mode') != 'PAPER':
         return await legacy.close(p, reason)
@@ -17,11 +17,6 @@ async def _close_at_snapshot(p, reason, snapshot):
     finally:
         legacy.price = original_price
 
-# Preserve the proven scalping rule:
-# 1) take the configured profit target immediately;
-# 2) after MAX_AGE (60s), arm TIMEOUT;
-# 3) once armed, close on the first non-negative market snapshot;
-# 4) never turn a TIMEOUT into a loss because of a second price read.
 async def manage():
     for p in list(legacy.S['positions']):
         snapshot = legacy.price(p['symbol']) or p['current']
@@ -29,6 +24,7 @@ async def manage():
         live = (snapshot / p['entry'] - 1) * 100
         age = time.time() - p['opened']
 
+        # Profit target always wins immediately when configured.
         if legacy.S['profit'] > 0 and live >= legacy.S['profit']:
             try:
                 print(f"[TRADE] CLOSE {p['symbol']} reason=PROFIT_TARGET age={age:.1f}s live={live:.4f}% price={snapshot}", flush=True)
@@ -37,33 +33,36 @@ async def manage():
                 legacy.S['error'] = f'Close {p["symbol"]}: {type(e).__name__}: {e}'
             continue
 
+        # TIMEOUT is an armed state, not a forced loss-taking close.
         if age >= legacy.MAX_AGE:
-            if live >= 0:
+            if not p.get('timeout_armed'):
                 p['timeout_armed'] = True
+                p['timeout_armed_at'] = time.time()
+                print(f"[TRADE] TIMEOUT_ARM {p['symbol']} age={age:.1f}s live={live:.4f}% price={snapshot}", flush=True)
+
+            # First snapshot at entry or better closes the position.
+            if live >= 0:
                 try:
                     print(f"[TRADE] CLOSE {p['symbol']} reason=TIMEOUT age={age:.1f}s live={live:.4f}% price={snapshot}", flush=True)
                     await _close_at_snapshot(p, 'TIMEOUT', snapshot)
                 except Exception as e:
                     legacy.S['error'] = f'Close {p["symbol"]}: {type(e).__name__}: {e}'
-            else:
-                if not p.get('timeout_armed'):
-                    p['timeout_armed'] = True
-                    print(f"[TRADE] TIMEOUT_ARM {p['symbol']} age={age:.1f}s live={live:.4f}% price={snapshot}", flush=True)
 
-# Keep exact open/slot behavior, but log fills so the real position age can be
-# verified directly against Render logs during the next PAPER test.
+# Log the real position creation and timestamp. This is the source of truth for
+# correlating position lifetime with AUTO TOP-6 and close events.
 _original_open_pos = legacy.open_pos
 async def open_pos_logged(i, s):
-    before = len(legacy.S.get('positions', []))
+    before_ids = {p.get('id') for p in legacy.S.get('positions', [])}
     await _original_open_pos(i, s)
-    after = legacy.S.get('positions', [])
-    if len(after) > before:
-        p = after[-1]
-        print(f"[TRADE] OPEN {p.get('symbol')} slot={p.get('slot')} stake={p.get('stake')} entry={p.get('entry')} mode={legacy.S.get('mode')}", flush=True)
+    for p in legacy.S.get('positions', []):
+        if p.get('id') not in before_ids and p.get('slot') == i and p.get('symbol') == s:
+            p.setdefault('timeout_armed', False)
+            print(f"[TRADE] OPEN {p.get('symbol')} slot={p.get('slot')} stake={p.get('stake')} entry={p.get('entry')} opened_at={p.get('opened_at')} mode={legacy.S.get('mode')}", flush=True)
+            break
 legacy.open_pos = open_pos_logged
 
-# Radar is isolated from the trade loop. A slow/reconnecting Radar refresh
-# must never block position management or slot filling.
+# Radar refresh is isolated from the trade loop. It cannot block position
+# management or slot filling.
 async def _radar_loop():
     while True:
         try:
