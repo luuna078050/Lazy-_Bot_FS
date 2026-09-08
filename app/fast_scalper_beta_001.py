@@ -102,3 +102,6 @@ async function addRadarPair(symbol){try{const a=Array.from({length:6},(_,i)=>$('
 async function autoTop6Click(){try{state=await request('/api/slots/auto-top6','POST',{slots:[],profit_pct:profit(),reinvest:reinvest()});syncSlots();render();$('msg').textContent='AUTO TOP-6 applied'}catch(e){$('msg').textContent=e.message}}
 $('paperBtn').addEventListener('click',()=>setMode('PAPER'));$('testModeBtn').addEventListener('click',()=>setMode('BINANCE_TEST'));$('testBtn').addEventListener('click',testBinanceClick);$('allocBtn').addEventListener('click',setAllocationClick);$('withdrawBtn').addEventListener('click',withdrawClick);$('onBtn').addEventListener('click',startClick);$('offBtn').addEventListener('click',offClick);$('emBtn').addEventListener('click',emergencyClick);$('resetBtn').addEventListener('click',resetClick);$('topBtn').addEventListener('click',autoTop6Click);drawSlots();load();setInterval(()=>{if(!modeBusy)load()},1000);
 </script></body></html>'''
+
+# Load the final UI/timeout patch only after legacy.HTML is defined.
+from . import fast_scalper_patch
