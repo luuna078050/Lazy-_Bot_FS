@@ -1,8 +1,64 @@
 from . import fast_scalper_beta_001_legacy as legacy
+from fastapi import HTTPException
+import time
 from .fast_scalper_antloss import manage as anti_loss_manage
 
-# Restore the previous anti-loss timeout behavior without changing the trading engine structure.
+# Restore anti-loss timeout behavior.
 legacy.manage = anti_loss_manage
+
+# Stamp every closed trade with the actual close time for the UI.
+_original_close = legacy.close
+async def close_with_timestamp(p, reason):
+    result = await _original_close(p, reason)
+    try:
+        for item in legacy.S.get('closed', []):
+            if item.get('symbol') == p.get('symbol') and 'closed_at' not in item:
+                item['closed_at'] = time.time()
+                break
+    except Exception:
+        pass
+    return result
+legacy.close = close_with_timestamp
+
+# Complete RESET for the paper state. Never erase an open position silently.
+async def reset_fixed():
+    if legacy.S.get('running') or legacy.S.get('positions'):
+        raise HTTPException(400, 'BOT OFF and no open positions required')
+    s = legacy.S
+    s['running'] = False
+    s['bot'] = 0.0
+    s['free'] = 0.0
+    s['realized'] = 0.0
+    s['session_realized'] = 0.0
+    s['session_trades'] = 0
+    s['session_started'] = None
+    s['session_elapsed'] = 0.0
+    s['day_started'] = None
+    s['day_elapsed'] = 0.0
+    s['positions'] = []
+    s['closed'] = []
+    s['orders'] = []
+    s['slots'] = [None] * legacy.MAX_SLOTS
+    s['profit'] = 0.41
+    s['reinvest'] = False
+    s['cycle'] = 0
+    s['last_radar'] = 0.0
+    s['error'] = None
+    if s.get('mode') == 'PAPER':
+        s['account'] = legacy.START
+        s['reserve'] = legacy.START
+    else:
+        # Binance Test account remains the account source; only bot allocation resets.
+        s['reserve'] = max(0.0, float(s.get('account', 0.0) or 0.0))
+    return await legacy.state()
+
+for r in list(legacy.app.router.routes):
+    if getattr(r, 'path', None) == '/api/reset' and 'POST' in (getattr(r, 'methods', set()) or set()):
+        legacy.app.router.routes.remove(r)
+
+@legacy.app.post('/api/reset')
+async def reset_endpoint():
+    return await reset_fixed()
 
 html = legacy.HTML
 html = html.replace(
@@ -18,7 +74,11 @@ html = html.replace(
     '.profit-pos{color:#16c784;font-weight:700}.profit-neg{color:#ff4d5f;font-weight:700}.line{font-size:12px;'
 )
 html = html.replace(
+    "$('pos').innerHTML=p.length?p.map(x=>`<div class=\"line\">${x.symbol} · ${num(x.stake)} USDT · ${num(x.current)}</div>`).join(''):'No open positions';",
+    "$('pos').innerHTML=p.length?p.map(x=>{const d=(Number(x.current||0)/Number(x.entry||x.current||1)-1)*100;return `<div class=\"line\">${x.symbol} · ${num(x.stake)} USDT · IN ${num(x.entry)} · Δ ${d>=0?'+':''}${d.toFixed(3)}% · OUT ${num(x.current)}</div>`}).join(''):'No open positions';"
+)
+html = html.replace(
     "$('closed').innerHTML=(state.closed||[]).slice(0,5).map(x=>`<div class=\"line\">${x.symbol} · ${x.reason} · ${num(x.pnl)} USDT · ${num(x.exit)}</div>`).join('')||'No closed trades';",
-    "$('closed').innerHTML=(state.closed||[]).slice(0,5).map(x=>`<div class=\"line ${Number(x.pnl)>=0?'profit-pos':'profit-neg'}\">${x.symbol} · ${x.reason} · ${num(x.pnl)} USDT · ${num(x.exit)}</div>`).join('')||'No closed trades';"
+    "$('closed').innerHTML=(state.closed||[]).slice(0,5).map(x=>{const pnl=Number(x.pnl||0);const ts=Number(x.closed_at||0);const t=ts?new Date(ts*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}):'--:--:--';return `<div class=\"line ${pnl>=0?'profit-pos':'profit-neg'}\">${x.symbol} · ${x.reason} · ${pnl>=0?'+':''}${pnl.toFixed(4)} USDT · ${num(x.stake)} · ${num(x.entry)}→${num(x.exit)} · ${t}</div>`}).join('')||'No closed trades';"
 )
 legacy.HTML = html
