@@ -1,8 +1,6 @@
 from . import fast_scalper_beta_001_legacy as legacy
 import asyncio
-import os
 import time
-import httpx
 
 # PAPER close must use the exact price that triggered the decision.
 async def _close_at_snapshot(p, reason, snapshot):
@@ -18,25 +16,6 @@ async def _close_at_snapshot(p, reason, snapshot):
         return await legacy.close(p, reason)
     finally:
         legacy.price = original_price
-
-# Render Free can stop an idle web service after a period without inbound traffic.
-# While the bot is actually running, keep the canonical service warm. This does
-# not change trading logic and stops the test session from disappearing merely
-# because the browser tab is backgrounded/closed.
-async def _render_keepalive():
-    base = os.getenv('RENDER_EXTERNAL_URL', 'https://fast-scalper-beta-001.onrender.com').rstrip('/')
-    while True:
-        try:
-            if legacy.S.get('running'):
-                async with httpx.AsyncClient(timeout=8) as client:
-                    await client.get(base + '/api/health', params={'ka': int(time.time())})
-        except Exception:
-            pass
-        await asyncio.sleep(300)
-
-@legacy.app.on_event('startup')
-async def _start_render_keepalive():
-    asyncio.create_task(_render_keepalive())
 
 async def manage():
     for p in list(legacy.S['positions']):
@@ -54,3 +33,37 @@ async def manage():
                 await _close_at_snapshot(p, 'TIMEOUT', snapshot)
             except Exception as e:
                 legacy.S['error'] = f'Close {p["symbol"]}: {type(e).__name__}: {e}'
+
+# Radar is isolated from the trade loop. A slow/reconnecting Radar refresh
+# must never block position management or slot filling.
+async def _radar_loop():
+    while True:
+        try:
+            if legacy.S.get('running'):
+                await asyncio.wait_for(legacy.radar(False), timeout=10)
+            else:
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            legacy.S['error'] = f'Radar: {type(e).__name__}: {e}'
+        await asyncio.sleep(1)
+
+async def engine_fixed():
+    asyncio.create_task(_radar_loop())
+    while True:
+        try:
+            if legacy.S.get('running'):
+                await manage()
+                for i, s in enumerate(list(legacy.S.get('slots', []))):
+                    if s and not any(p['slot'] == i for p in legacy.S.get('positions', [])):
+                        await legacy.open_pos(i, s)
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            legacy.S['error'] = f'Engine: {type(e).__name__}: {e}'
+            await asyncio.sleep(1)
+
+legacy.manage = manage
+legacy.engine = engine_fixed
