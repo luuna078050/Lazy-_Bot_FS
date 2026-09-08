@@ -1,8 +1,9 @@
 services:
   - type: web
-    name: fast-scalper
+    name: fast-scalper-beta-001
     env: python
     plan: free
+    region: frankfurt
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn app.fast_scalper_beta_001:app --host 0.0.0.0 --port $PORT
     autoDeploy: true
