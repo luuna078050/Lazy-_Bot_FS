@@ -91,7 +91,7 @@ html = html.replace(
 )
 html = html.replace(
     "$('pos').innerHTML=p.length?p.map(x=>`<div class=\"line\">${x.symbol} · ${num(x.stake)} USDT · ${num(x.current)}</div>`).join(''):'No open positions';",
-    "$('pos').innerHTML=p.length?p.map(x=>{const d=(Number(x.current||0)/Number(x.entry||x.current||1)-1)*100;return `<div class=\"line\">${x.symbol} · ${num(x.stake)} USDT · IN ${num(x.entry)} · Δ ${d>=0?'+':''}${d.toFixed(3)}% · OUT ${num(x.current)}</div>`}).join(''):'No open positions';"
+    "$('pos').innerHTML=p.length?p.map(x=>{const d=(Number(x.current||0)/Number(x.entry||x.current||1)-1)*100;const age=Math.max(0,Math.floor(Date.now()/1000-Number(x.opened||Date.now()/1000)));const arm=x.timeout_armed?' · TIMEOUT ARMED':'';return `<div class=\"line\">${x.symbol} · ${num(x.stake)} USDT · AGE ${clock(age)}${arm} · IN ${num(x.entry)} · Δ ${d>=0?'+':''}${d.toFixed(3)}% · OUT ${num(x.current)}</div>`}).join(''):'No open positions';"
 )
 html = html.replace(
     "$('closed').innerHTML=(state.closed||[]).slice(0,5).map(x=>`<div class=\"line\">${x.symbol} · ${x.reason} · ${num(x.pnl)} USDT · ${num(x.exit)}</div>`).join('')||'No closed trades';",
