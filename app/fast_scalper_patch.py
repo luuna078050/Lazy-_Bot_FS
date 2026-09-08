@@ -3,7 +3,7 @@ from fastapi import HTTPException
 import time
 from .fast_scalper_antloss import manage as anti_loss_manage
 
-# Restore anti-loss timeout behavior.
+# Keep anti-loss timeout behavior and the isolated trade engine.
 legacy.manage = anti_loss_manage
 
 # Stamp every closed trade with the actual close time for the UI.
@@ -19,6 +19,23 @@ async def close_with_timestamp(p, reason):
         pass
     return result
 legacy.close = close_with_timestamp
+
+# Start a new session with a clean current-session trade list. This prevents
+# trades from an earlier session being mistaken for trades from the current run.
+_original_start = legacy.start
+async def start_clean(b):
+    result = await _original_start(b)
+    legacy.S['closed'] = []
+    legacy.S['orders'] = []
+    return await legacy.state()
+
+for r in list(legacy.app.router.routes):
+    if getattr(r, 'path', None) == '/api/paper/start' and 'POST' in (getattr(r, 'methods', set()) or set()):
+        legacy.app.router.routes.remove(r)
+
+@legacy.app.post('/api/paper/start')
+async def start_endpoint(b: legacy.Start):
+    return await start_clean(b)
 
 # Complete RESET for the paper state. Never erase an open position silently.
 async def reset_fixed():
@@ -48,7 +65,6 @@ async def reset_fixed():
         s['account'] = legacy.START
         s['reserve'] = legacy.START
     else:
-        # Binance Test account remains the account source; only bot allocation resets.
         s['reserve'] = max(0.0, float(s.get('account', 0.0) or 0.0))
     return await legacy.state()
 
