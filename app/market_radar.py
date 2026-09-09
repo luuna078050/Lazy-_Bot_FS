@@ -105,9 +105,6 @@ class MarketRadar:
             if ts<=target: old=px
             else: break
         if old is None:
-            # During warm-up, use the oldest available sample but mark it as
-            # short-history momentum; the entry filter below still requires a
-            # minimum age so the bot does not trade immediately on startup.
             return (price/h[0][1]-1)*100
         return (price/old-1)*100 if old else None
 
@@ -132,16 +129,13 @@ class MarketRadar:
             m3=self._momentum_3m(s.upper(),price,now)
             if m3 is None:m3=0.0
             liquidity=min(1.0,max(0.0,math.log10(max(vol,1))/10))
-            # Direction is deliberately dominated by actual 3m momentum.
-            # 24h change is only a secondary confirmation, not the entry signal.
             momentum_score=min(1.0,max(0.0,m3)/0.8)
             confirmation=min(1.0,max(0.0,pct24)/5.0)
             score=100*(0.65*momentum_score+0.20*confirmation+0.15*liquidity)
-            buy_ok=history_age>=45 and m3>=0.08 and pct24>-3.0
+            buy_ok=history_age>=30 and m3>=0.03 and pct24>-3.0
             signal="BUY" if buy_ok else ("WATCH" if m3>0 else "WAIT")
             target_pct=min(0.006,max(0.0035,abs(m3)/100*0.8))
             rows.append({"symbol":s[:-4]+"/USDT","price":price,"change_24h_pct":round(pct24,3),"quote_volume_24h":vol,"score":round(score,2),"signal":signal,"tf":"3m","estimated_entry":price,"estimated_exit":price*(1+target_pct),"estimated_stop":price*(1-.002),"change_3m_pct":round(m3,4),"volume_ratio":1.0,"pump_events":0,"pump_score":round(max(0.0,m3)/10,3),"hold_seconds":60,"history_age":round(history_age,1)})
-        # BUY candidates first. Within each group, strongest 3m momentum wins.
         rows.sort(key=lambda x:(x["signal"]=="BUY",x["change_3m_pct"],x["score"],x["quote_volume_24h"]),reverse=True)
         return rows[:int(limit)]
 
