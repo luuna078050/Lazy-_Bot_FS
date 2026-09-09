@@ -10,54 +10,56 @@ MIN_SIGNAL_AGE=30.0
 MIN_3M_MOMENTUM=0.03
 _cooldowns={}
 _last_radar_refresh=0.0
+_radar_lock=asyncio.Lock()
 
 async def radar_fixed(force=False):
     global _last_radar_refresh
     now=time.time()
     if not force and _last_radar_refresh and now-_last_radar_refresh<10:
         return
-    try:
-        # RADAR.snapshot() is synchronous and contains blocking waits/sleeps.
-        # Never run it on the FastAPI event-loop thread: doing so can freeze
-        # /api/state and the trading engine while the radar warms/reconnects.
-        rows=await asyncio.to_thread(RADAR.snapshot,15)
-        out=[]
-        for x in rows:
-            s=str(x.get('symbol','')).replace('/','').upper()
-            if not s:
-                continue
-            out.append({
-                'symbol':s,
-                'price':float(x.get('price') or 0),
-                'change':float(x.get('change_24h_pct') or 0),
-                'change_24h_pct':float(x.get('change_24h_pct') or 0),
-                'change_3m_pct':float(x.get('change_3m_pct') or 0),
-                'history_age':float(x.get('history_age') or 0),
-                'volume':float(x.get('quote_volume_24h') or 0),
-                'quote_volume_24h':float(x.get('quote_volume_24h') or 0),
-                'score':float(x.get('score') or 0),
-                'signal':x.get('signal','WAIT'),
-                'tf':'3m',
-                'estimated_entry':float(x.get('estimated_entry') or x.get('price') or 0),
-                'estimated_exit':float(x.get('estimated_exit') or x.get('price') or 0),
-                'estimated_stop':float(x.get('estimated_stop') or 0),
-                'volume_ratio':float(x.get('volume_ratio') or 1.0),
-                'pump_events':int(x.get('pump_events') or 0),
-                'pump_score':float(x.get('pump_score') or 0),
-                'hold_seconds':int(x.get('hold_seconds') or 60),
-            })
-        out.sort(key=lambda x:(x['signal']=='BUY',x['change_3m_pct'],x['score'],x['quote_volume_24h']),reverse=True)
-        legacy.S['ranking']=out[:15]
-        legacy.S['last_radar']=now
-        legacy.S['error']=None if not RADAR.last_error else 'Radar WebSocket: '+str(RADAR.last_error)
-        if out:
-            top=','.join(f"{x['symbol']}:{x['signal']}:{x['change_3m_pct']:.3f}%/{x['history_age']:.0f}s" for x in out[:6])
-            print(f"[RADAR] TOP6 {top}",flush=True)
-        _last_radar_refresh=now
-    except Exception as e:
-        legacy.S['error']=f'Radar: {type(e).__name__}: {e}'
-        legacy.S['last_radar']=now
-        _last_radar_refresh=now
+    async with _radar_lock:
+        now=time.time()
+        if not force and _last_radar_refresh and now-_last_radar_refresh<10:
+            return
+        try:
+            rows=await asyncio.to_thread(RADAR.snapshot,15)
+            out=[]
+            for x in rows:
+                s=str(x.get('symbol','')).replace('/','').upper()
+                if not s:
+                    continue
+                out.append({
+                    'symbol':s,
+                    'price':float(x.get('price') or 0),
+                    'change':float(x.get('change_24h_pct') or 0),
+                    'change_24h_pct':float(x.get('change_24h_pct') or 0),
+                    'change_3m_pct':float(x.get('change_3m_pct') or 0),
+                    'history_age':float(x.get('history_age') or 0),
+                    'volume':float(x.get('quote_volume_24h') or 0),
+                    'quote_volume_24h':float(x.get('quote_volume_24h') or 0),
+                    'score':float(x.get('score') or 0),
+                    'signal':x.get('signal','WAIT'),
+                    'tf':'3m',
+                    'estimated_entry':float(x.get('estimated_entry') or x.get('price') or 0),
+                    'estimated_exit':float(x.get('estimated_exit') or x.get('price') or 0),
+                    'estimated_stop':float(x.get('estimated_stop') or 0),
+                    'volume_ratio':float(x.get('volume_ratio') or 1.0),
+                    'pump_events':int(x.get('pump_events') or 0),
+                    'pump_score':float(x.get('pump_score') or 0),
+                    'hold_seconds':int(x.get('hold_seconds') or 60),
+                })
+            out.sort(key=lambda x:(x['signal']=='BUY',x['change_3m_pct'],x['score'],x['quote_volume_24h']),reverse=True)
+            legacy.S['ranking']=out[:15]
+            legacy.S['last_radar']=now
+            legacy.S['error']=None if not RADAR.last_error else 'Radar WebSocket: '+str(RADAR.last_error)
+            if out:
+                top=','.join(f"{x['symbol']}:{x['signal']}:{x['change_3m_pct']:.3f}%/{x['history_age']:.0f}s" for x in out[:6])
+                print(f"[RADAR] TOP6 {top}",flush=True)
+            _last_radar_refresh=now
+        except Exception as e:
+            legacy.S['error']=f'Radar: {type(e).__name__}: {e}'
+            legacy.S['last_radar']=now
+            _last_radar_refresh=now
 
 legacy.radar=radar_fixed
 
@@ -104,6 +106,11 @@ async def open_pos_filtered(i, s):
     now=time.time()
     until=_cooldowns.get(s,0.0)
     if until>now:return
+    # A symbol may occupy only one live position at a time. This prevents
+    # slot rotation from opening a duplicate symbol while the old slot is
+    # still holding it.
+    if any(str(p.get('symbol','')).upper().replace('/','')==s for p in legacy.S.get('positions',[])):
+        return
     row=next((x for x in legacy.S.get('ranking',[]) if str(x.get('symbol','')).replace('/','').upper()==s),None)
     if not row or row.get('signal')!='BUY':
         return
@@ -143,9 +150,14 @@ async def engine_fixed():
         try:
             if legacy.S.get('running'):
                 await manage()
+                occupied_symbols={str(p.get('symbol','')).upper().replace('/','') for p in legacy.S.get('positions',[])}
                 for i,s in enumerate(list(legacy.S.get('slots',[]))):
                     if s and not any(p['slot']==i for p in legacy.S.get('positions',[])):
+                        normalized=str(s).upper().replace('/','')
+                        if normalized in occupied_symbols:
+                            continue
                         await legacy.open_pos(i,s)
+                        occupied_symbols={str(p.get('symbol','')).upper().replace('/','') for p in legacy.S.get('positions',[])}
             await asyncio.sleep(1)
         except asyncio.CancelledError:
             raise
