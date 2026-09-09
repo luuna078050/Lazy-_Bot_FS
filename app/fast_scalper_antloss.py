@@ -1,4 +1,5 @@
 from . import fast_scalper_beta_001_legacy as legacy
+from .market_radar import RADAR
 import asyncio
 import time
 
@@ -11,6 +12,50 @@ MIN_SIGNAL_AGE=45.0
 MIN_3M_MOMENTUM=0.08
 _cooldowns={}
 _last_radar_refresh=0.0
+
+async def radar_fixed(force=False):
+    global _last_radar_refresh
+    now=time.time()
+    if not force and _last_radar_refresh and now-_last_radar_refresh<10:
+        return
+    try:
+        rows=RADAR.snapshot(15)
+        out=[]
+        for x in rows:
+            s=str(x.get('symbol','')).replace('/','').upper()
+            if not s:
+                continue
+            out.append({
+                'symbol':s,
+                'price':float(x.get('price') or 0),
+                'change':float(x.get('change_24h_pct') or 0),
+                'change_24h_pct':float(x.get('change_24h_pct') or 0),
+                'change_3m_pct':float(x.get('change_3m_pct') or 0),
+                'history_age':float(x.get('history_age') or 0),
+                'volume':float(x.get('quote_volume_24h') or 0),
+                'quote_volume_24h':float(x.get('quote_volume_24h') or 0),
+                'score':float(x.get('score') or 0),
+                'signal':x.get('signal','WAIT'),
+                'tf':'3m',
+                'estimated_entry':float(x.get('estimated_entry') or x.get('price') or 0),
+                'estimated_exit':float(x.get('estimated_exit') or x.get('price') or 0),
+                'estimated_stop':float(x.get('estimated_stop') or 0),
+                'volume_ratio':float(x.get('volume_ratio') or 1.0),
+                'pump_events':int(x.get('pump_events') or 0),
+                'pump_score':float(x.get('pump_score') or 0),
+                'hold_seconds':int(x.get('hold_seconds') or 60),
+            })
+        out.sort(key=lambda x:(x['signal']=='BUY',x['change_3m_pct'],x['score'],x['quote_volume_24h']),reverse=True)
+        legacy.S['ranking']=out[:15]
+        legacy.S['last_radar']=now
+        legacy.S['error']=None if not RADAR.last_error else 'Radar WebSocket: '+str(RADAR.last_error)
+        _last_radar_refresh=now
+    except Exception as e:
+        legacy.S['error']=f'Radar: {type(e).__name__}: {e}'
+        legacy.S['last_radar']=now
+        _last_radar_refresh=now
+
+legacy.radar=radar_fixed
 
 async def _close_at_snapshot(p, reason, snapshot):
     if legacy.S.get('mode') != 'PAPER':
