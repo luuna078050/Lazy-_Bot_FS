@@ -2,7 +2,6 @@ from . import fast_scalper_beta_001_legacy as legacy
 import asyncio
 import time
 
-# PAPER close must use the exact market snapshot that triggered the decision.
 async def _close_at_snapshot(p, reason, snapshot):
     if legacy.S.get('mode') != 'PAPER':
         return await legacy.close(p, reason)
@@ -19,37 +18,24 @@ async def _close_at_snapshot(p, reason, snapshot):
 
 async def manage():
     for p in list(legacy.S['positions']):
-        snapshot = legacy.price(p['symbol']) or p['current']
-        p['current'] = snapshot
-        live = (snapshot / p['entry'] - 1) * 100
-        age = time.time() - p['opened']
+        try:
+            snapshot = legacy.price(p['symbol']) or p['current']
+            p['current'] = snapshot
+            live = (snapshot / p['entry'] - 1) * 100
+            age = time.time() - p['opened']
 
-        # Profit target always wins immediately when configured.
-        if legacy.S['profit'] > 0 and live >= legacy.S['profit']:
-            try:
+            if legacy.S['profit'] > 0 and live >= legacy.S['profit']:
                 print(f"[TRADE] CLOSE {p['symbol']} reason=PROFIT_TARGET age={age:.1f}s live={live:.4f}% price={snapshot}", flush=True)
                 await _close_at_snapshot(p, 'PROFIT_TARGET', snapshot)
-            except Exception as e:
-                legacy.S['error'] = f'Close {p["symbol"]}: {type(e).__name__}: {e}'
-            continue
+                continue
 
-        # TIMEOUT is an armed state, not a forced loss-taking close.
-        if age >= legacy.MAX_AGE:
-            if not p.get('timeout_armed'):
-                p['timeout_armed'] = True
-                p['timeout_armed_at'] = time.time()
-                print(f"[TRADE] TIMEOUT_ARM {p['symbol']} age={age:.1f}s live={live:.4f}% price={snapshot}", flush=True)
+            if age >= legacy.MAX_AGE:
+                print(f"[TRADE] CLOSE {p['symbol']} reason=TIMEOUT age={age:.1f}s live={live:.4f}% price={snapshot}", flush=True)
+                await _close_at_snapshot(p, 'TIMEOUT', snapshot)
+                continue
+        except Exception as e:
+            legacy.S['error'] = f'Manage {p.get("symbol")}: {type(e).__name__}: {e}'
 
-            # First snapshot at entry or better closes the position.
-            if live >= 0:
-                try:
-                    print(f"[TRADE] CLOSE {p['symbol']} reason=TIMEOUT age={age:.1f}s live={live:.4f}% price={snapshot}", flush=True)
-                    await _close_at_snapshot(p, 'TIMEOUT', snapshot)
-                except Exception as e:
-                    legacy.S['error'] = f'Close {p["symbol"]}: {type(e).__name__}: {e}'
-
-# Log the real position creation and timestamp. This is the source of truth for
-# correlating position lifetime with AUTO TOP-6 and close events.
 _original_open_pos = legacy.open_pos
 async def open_pos_logged(i, s):
     before_ids = {p.get('id') for p in legacy.S.get('positions', [])}
@@ -61,8 +47,6 @@ async def open_pos_logged(i, s):
             break
 legacy.open_pos = open_pos_logged
 
-# Radar refresh is isolated from the trade loop. It cannot block position
-# management or slot filling.
 async def _radar_loop():
     while True:
         try:
