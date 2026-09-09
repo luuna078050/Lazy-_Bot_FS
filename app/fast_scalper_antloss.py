@@ -3,13 +3,11 @@ from .market_radar import RADAR
 import asyncio
 import time
 
-# A timeout is a safety exit, not the normal entry/exit mechanism.
-# Prevent immediate re-entry on the same symbol after an exit.
 COOLDOWN_PROFIT=5.0
 COOLDOWN_TIMEOUT=20.0
 COOLDOWN_ERROR=10.0
-MIN_SIGNAL_AGE=45.0
-MIN_3M_MOMENTUM=0.08
+MIN_SIGNAL_AGE=30.0
+MIN_3M_MOMENTUM=0.03
 _cooldowns={}
 _last_radar_refresh=0.0
 
@@ -49,6 +47,9 @@ async def radar_fixed(force=False):
         legacy.S['ranking']=out[:15]
         legacy.S['last_radar']=now
         legacy.S['error']=None if not RADAR.last_error else 'Radar WebSocket: '+str(RADAR.last_error)
+        if out:
+            top=','.join(f"{x['symbol']}:{x['signal']}:{x['change_3m_pct']:.3f}%/{x['history_age']:.0f}s" for x in out[:6])
+            print(f"[RADAR] TOP6 {top}",flush=True)
         _last_radar_refresh=now
     except Exception as e:
         legacy.S['error']=f'Radar: {type(e).__name__}: {e}'
@@ -79,13 +80,11 @@ async def manage():
             p['current'] = snapshot
             live = (snapshot / p['entry'] - 1) * 100
             age = now - p['opened']
-
             if legacy.S['profit'] > 0 and live >= legacy.S['profit']:
                 print(f"[TRADE] CLOSE {p['symbol']} reason=PROFIT_TARGET age={age:.1f}s live={live:.4f}% price={snapshot}", flush=True)
                 await _close_at_snapshot(p, 'PROFIT_TARGET', snapshot)
                 _cooldowns[p['symbol']]=time.time()+COOLDOWN_PROFIT
                 continue
-
             if age >= legacy.MAX_AGE:
                 print(f"[TRADE] CLOSE {p['symbol']} reason=TIMEOUT age={age:.1f}s live={live:.4f}% price={snapshot}", flush=True)
                 await _close_at_snapshot(p, 'TIMEOUT', snapshot)
@@ -102,9 +101,6 @@ async def open_pos_filtered(i, s):
     now=time.time()
     until=_cooldowns.get(s,0.0)
     if until>now:return
-
-    # Never open a scalping position merely because a symbol is liquid.
-    # Require a fresh short-term BUY signal from the 3m radar.
     row=next((x for x in legacy.S.get('ranking',[]) if str(x.get('symbol','')).replace('/','').upper()==s),None)
     if not row or row.get('signal')!='BUY':
         return
