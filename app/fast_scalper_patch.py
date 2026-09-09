@@ -2,9 +2,49 @@ from . import fast_scalper_beta_001_legacy as legacy
 from fastapi import HTTPException
 import time
 from . import binance_resilience
-from .fast_scalper_antloss import manage as anti_loss_manage
+from . import fast_scalper_antloss as anti
 
-legacy.manage = anti_loss_manage
+# Keep one authoritative trade manager. A hard timeout must never force a
+# losing PAPER position to close. Once the normal timeout is reached while
+# negative, the position enters recovery and gets another timeout window.
+# It may close on the profit target or on a later non-negative timeout.
+legacy.MAX_AGE = 60
+RECOVERY_REARM_SECONDS = 60.0
+
+async def manage_safe():
+    now=time.time()
+    for p in list(legacy.S['positions']):
+        try:
+            snapshot = legacy.price(p['symbol']) or p['current']
+            p['current'] = snapshot
+            live = (snapshot / p['entry'] - 1) * 100
+            age = now - p['opened']
+
+            if legacy.S['profit'] > 0 and live >= legacy.S['profit']:
+                print(f"[TRADE] CLOSE {p['symbol']} reason=PROFIT_TARGET age={age:.1f}s live={live:.4f}% price={snapshot}", flush=True)
+                await anti._close_at_snapshot(p, 'PROFIT_TARGET', snapshot)
+                anti._cooldowns[p['symbol']] = time.time() + anti.COOLDOWN_PROFIT
+                continue
+
+            if age >= legacy.MAX_AGE:
+                if live >= 0:
+                    print(f"[TRADE] CLOSE {p['symbol']} reason=TIMEOUT age={age:.1f}s live={live:.4f}% price={snapshot}", flush=True)
+                    await anti._close_at_snapshot(p, 'TIMEOUT', snapshot)
+                    anti._cooldowns[p['symbol']] = time.time() + anti.COOLDOWN_TIMEOUT
+                else:
+                    # Never create a negative TIMEOUT close. Re-arm the hold
+                    # window and wait for recovery instead of crystallizing a
+                    # small loss every minute.
+                    p['opened'] = now
+                    p['timeout_armed'] = True
+                    print(f"[TRADE] HOLD {p['symbol']} reason=TIMEOUT_DEFERRED age={age:.1f}s live={live:.4f}% price={snapshot}", flush=True)
+        except Exception as e:
+            legacy.S['error'] = f'Manage {p.get("symbol")}: {type(e).__name__}: {e}'
+            anti._cooldowns[p.get('symbol','')] = time.time() + anti.COOLDOWN_ERROR
+
+# Replace the manager used by both the legacy state and the anti-loss engine.
+anti.manage = manage_safe
+legacy.manage = manage_safe
 
 _original_close = legacy.close
 async def close_with_timestamp(p, reason):
