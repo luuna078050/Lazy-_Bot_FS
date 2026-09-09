@@ -17,7 +17,10 @@ async def radar_fixed(force=False):
     if not force and _last_radar_refresh and now-_last_radar_refresh<10:
         return
     try:
-        rows=RADAR.snapshot(15)
+        # RADAR.snapshot() is synchronous and contains blocking waits/sleeps.
+        # Never run it on the FastAPI event-loop thread: doing so can freeze
+        # /api/state and the trading engine while the radar warms/reconnects.
+        rows=await asyncio.to_thread(RADAR.snapshot,15)
         out=[]
         for x in rows:
             s=str(x.get('symbol','')).replace('/','').upper()
