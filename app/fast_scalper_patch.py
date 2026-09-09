@@ -11,7 +11,7 @@ async def close_with_timestamp(p, reason):
     result = await _original_close(p, reason)
     try:
         for item in legacy.S.get('closed', []):
-            if item.get('symbol') == p.get('symbol') and 'closed_at' not in item:
+            if item.get('symbol') == p.get('symbol'):
                 item['closed_at'] = time.time()
                 break
     except Exception:
@@ -72,6 +72,41 @@ for r in list(legacy.app.router.routes):
 async def reset_endpoint():
     return await reset_fixed()
 
+# Reconcile AUTO TOP-6 with live positions. The old endpoint changed slot
+# symbols without reconciling positions tied to the old slot index. That can
+# leave stale positions attached to changed slots and can create duplicate
+# symbols during rotation.
+for r in list(legacy.app.router.routes):
+    if getattr(r, 'path', None) == '/api/slots/auto-top6' and 'POST' in (getattr(r, 'methods', set()) or set()):
+        legacy.app.router.routes.remove(r)
+
+@legacy.app.post('/api/slots/auto-top6')
+async def auto_top6_fixed(b: legacy.Slots):
+    await legacy.radar(True)
+    ranked=[]
+    seen=set()
+    for x in legacy.S.get('ranking',[]):
+        s=str(x.get('symbol','')).upper().replace('/','')
+        if s and s not in seen:
+            ranked.append(s)
+            seen.add(s)
+    target=ranked[:legacy.MAX_SLOTS]
+    old=list(legacy.S.get('slots',[]))
+    for i in range(legacy.MAX_SLOTS):
+        old_s=str(old[i] or '').upper().replace('/','')
+        new_s=str(target[i] if i < len(target) else '').upper().replace('/','')
+        if old_s != new_s:
+            for p in list(legacy.S.get('positions',[])):
+                if p.get('slot') == i:
+                    try:
+                        await legacy.close(p,'ROTATION')
+                    except Exception as e:
+                        legacy.S['error']=f'Rotation close {p.get("symbol")}: {type(e).__name__}: {e}'
+    legacy.S['slots']=target+[None]*(legacy.MAX_SLOTS-len(target))
+    legacy.S['profit']=b.profit_pct
+    legacy.S['reinvest']=b.reinvest
+    return await legacy.state()
+
 html = legacy.HTML
 html = html.replace(
     '.row{display:flex;gap:8px;flex-wrap:wrap}',
@@ -86,8 +121,12 @@ html = html.replace(
     '.profit-pos{color:#16c784;font-weight:700}.profit-neg{color:#ff4d5f;font-weight:700}.line{font-size:12px;'
 )
 html = html.replace(
+    '.profit-pos{color:#16c784;font-weight:700}.profit-neg{color:#ff4d5f;font-weight:700}.line{font-size:12px;',
+    '.profit-pos{color:#16c784;font-weight:700}.profit-neg{color:#ff4d5f;font-weight:700}.pos-line{display:flex;align-items:center;gap:6px;font-size:11px;padding:4px 0;border-bottom:1px solid #24314a}.pos-main{min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pos-timer{flex:0 0 auto;font-weight:800}.line{font-size:12px;'
+)
+html = html.replace(
     "$('pos').innerHTML=p.length?p.map(x=>`<div class=\"line\">${x.symbol} · ${num(x.stake)} USDT · ${num(x.current)}</div>`).join(''):'No open positions';",
-    "$('pos').innerHTML=p.length?p.map(x=>{const d=(Number(x.current||0)/Number(x.entry||x.current||1)-1)*100;const age=Math.max(0,Math.floor(Date.now()/1000-Number(x.opened||Date.now()/1000)));return `<div class=\"line\">${x.symbol} · ${num(x.stake)} USDT · IN ${num(x.entry)} · Δ ${d>=0?'+':''}${d.toFixed(3)}% · OUT ${num(x.current)} · ${clock(age)}</div>`}).join(''):'No open positions';"
+    "$('pos').innerHTML=p.length?p.map(x=>{const d=(Number(x.current||0)/Number(x.entry||x.current||1)-1)*100;const age=Math.max(0,Math.floor(Date.now()/1000-Number(x.opened||Date.now()/1000)));return `<div class=\"pos-line\"><span class=\"pos-main\">${x.symbol} · ${num(x.stake)} USDT · IN ${num(x.entry)} · Δ ${d>=0?'+':''}${d.toFixed(3)}% · OUT ${num(x.current)}</span><span class=\"pos-timer\">${clock(age)}</span></div>`}).join(''):'No open positions';"
 )
 html = html.replace(
     "$('closed').innerHTML=(state.closed||[]).slice(0,5).map(x=>`<div class=\"line\">${x.symbol} · ${x.reason} · ${num(x.pnl)} USDT · ${num(x.exit)}</div>`).join('')||'No closed trades';",
