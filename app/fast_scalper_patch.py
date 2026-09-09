@@ -1,12 +1,11 @@
 from . import fast_scalper_beta_001_legacy as legacy
 from fastapi import HTTPException
 import time
+from . import binance_resilience
 from .fast_scalper_antloss import manage as anti_loss_manage
 
-# Keep anti-loss timeout behavior and the isolated trade engine.
 legacy.manage = anti_loss_manage
 
-# Stamp every closed trade with the actual close time for the UI.
 _original_close = legacy.close
 async def close_with_timestamp(p, reason):
     result = await _original_close(p, reason)
@@ -20,8 +19,6 @@ async def close_with_timestamp(p, reason):
     return result
 legacy.close = close_with_timestamp
 
-# Start a new session with a clean current-session trade list. This prevents
-# trades from an earlier session being mistaken for trades from the current run.
 _original_start = legacy.start
 async def start_clean(b):
     result = await _original_start(b)
@@ -37,7 +34,6 @@ for r in list(legacy.app.router.routes):
 async def start_endpoint(b: legacy.Start):
     return await start_clean(b)
 
-# Complete RESET for the paper state. Never erase an open position silently.
 async def reset_fixed():
     if legacy.S.get('running') or legacy.S.get('positions'):
         raise HTTPException(400, 'BOT OFF and no open positions required')
@@ -91,7 +87,7 @@ html = html.replace(
 )
 html = html.replace(
     "$('pos').innerHTML=p.length?p.map(x=>`<div class=\"line\">${x.symbol} · ${num(x.stake)} USDT · ${num(x.current)}</div>`).join(''):'No open positions';",
-    "$('pos').innerHTML=p.length?p.map(x=>{const d=(Number(x.current||0)/Number(x.entry||x.current||1)-1)*100;const age=Math.max(0,Math.floor(Date.now()/1000-Number(x.opened||Date.now()/1000)));const arm=x.timeout_armed?' · TIMEOUT ARMED':'';return `<div class=\"line\">${x.symbol} · ${num(x.stake)} USDT · AGE ${clock(age)}${arm} · IN ${num(x.entry)} · Δ ${d>=0?'+':''}${d.toFixed(3)}% · OUT ${num(x.current)}</div>`}).join(''):'No open positions';"
+    "$('pos').innerHTML=p.length?p.map(x=>{const d=(Number(x.current||0)/Number(x.entry||x.current||1)-1)*100;const age=Math.max(0,Math.floor(Date.now()/1000-Number(x.opened||Date.now()/1000)));return `<div class=\"line\">${x.symbol} · ${num(x.stake)} USDT · IN ${num(x.entry)} · Δ ${d>=0?'+':''}${d.toFixed(3)}% · OUT ${num(x.current)} · ${clock(age)}</div>`}).join(''):'No open positions';"
 )
 html = html.replace(
     "$('closed').innerHTML=(state.closed||[]).slice(0,5).map(x=>`<div class=\"line\">${x.symbol} · ${x.reason} · ${num(x.pnl)} USDT · ${num(x.exit)}</div>`).join('')||'No closed trades';",
