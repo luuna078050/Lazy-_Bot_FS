@@ -5,24 +5,28 @@ import asyncio, re, time
 # Do not add Radar logic here.
 html = legacy.HTML
 
-# Exact approved control layout:
-# Amount is the single amount field used by both SET BOT BALANCE and WITHDRAW.
-# Profit Target is a separate field with default 0.41. Reinvest remains user-controlled.
-old_controls = '<div class="card"><div class="row"><input id="allocation" class="input amount" type="number" step="0.01" min="0" placeholder="Amount"><button type="button" class="btn test" id="allocBtn">SET BOT BALANCE</button><button type="button" class="btn stop" id="withdrawBtn">WITHDRAW</button><input id="profit" class="input" type="number" step="0.01" value="0.41"><label style="padding:10px"><input id="reinvest" type="checkbox" checked> Reinvest</label></div>'
-new_controls = '<div class="card"><div class="row allocation-row"><input id="allocation" class="input amount" type="number" step="0.01" min="0" placeholder="Amount"><button type="button" class="btn test" id="allocBtn">SET BOT BALANCE</button><button type="button" class="btn stop" id="withdrawBtn">WITHDRAW</button></div><div class="row profit-row" style="margin-top:8px"><input id="profit" class="input" type="number" step="0.01" value="0.41"><label style="padding:10px"><input id="reinvest" type="checkbox" checked> Reinvest</label></div>'
-if old_controls not in html:
-    raise RuntimeError('Expected Fast Scalper control block not found')
-html = html.replace(old_controls, new_controls, 1)
+# Restore the approved compact mobile control layout.
+alloc_pos = html.find('id="allocation"')
+start = html.rfind('<div class="card">', 0, alloc_pos)
+end = html.find('<div class="card">', alloc_pos + 1)
+if start < 0 or end < 0:
+    raise RuntimeError('Fast Scalper allocation card not found')
 
-# Make the first control row stay on one line on the phone-sized layout.
+desired = '<div class="card"><div class="row allocation-row"><input id="allocation" class="input amount" type="number" step="0.01" min="0" placeholder="Amount"><button type="button" class="btn test" id="allocBtn">SET BOT BALANCE</button><button type="button" class="btn stop" id="withdrawBtn">WITHDRAW</button></div><div class="row profit-row" style="margin-top:8px"><input id="profit" class="input" type="number" step="0.01" value="0.41"><label style="padding:10px"><input id="reinvest" type="checkbox" checked> Reinvest</label></div></div>'
+html = html[:start] + desired + html[end:]
+
+# Keep Amount + both action buttons on one line on the phone.
 html = html.replace('.amount{flex:0 0 150px;max-width:150px}', '.amount{flex:1 1 0;min-width:0;max-width:none}')
 html = html.replace('.btn{border:0;border-radius:10px;padding:11px 15px;', '.btn{border:0;border-radius:10px;padding:10px 12px;')
-html = html.replace('@media(max-width:650px){', '@media(max-width:650px){.allocation-row{flex-wrap:nowrap}.allocation-row .amount{min-width:0}.allocation-row .btn{font-size:12px;padding:10px 9px;white-space:nowrap}.profit-row{align-items:center}')
+html = html.replace('.row{display:flex;gap:8px;flex-wrap:wrap}', '.row{display:flex;gap:8px;flex-wrap:wrap}.allocation-row{flex-wrap:nowrap;align-items:center}.allocation-row .amount{flex:1 1 0;min-width:0;max-width:none}.allocation-row .btn{font-size:11px;padding:10px 8px;white-space:nowrap}.profit-row{align-items:center}')
+html = html.replace('@media(max-width:650px){', '@media(max-width:650px){.allocation-row{flex-wrap:nowrap}.allocation-row .btn{font-size:11px;padding:10px 7px;white-space:nowrap}.allocation-row .amount{min-width:0}}')
 
 # The single Amount field is also the withdrawal amount.
-html = html.replace("async function withdrawClick(){try{const a=Number($('withdrawAmount').value);if(!Number.isFinite(a)||a<=0)throw Error('Enter withdrawal amount');state=await request('/api/withdraw','POST',{amount:a});$('msg').textContent='Withdrawn to Reserve: '+num(a)+' USDT';$('withdrawAmount').value='';render()}catch(e){$('msg').textContent=e.message}}", "async function withdrawClick(){try{const a=Number($('allocation').value);if(!Number.isFinite(a)||a<=0)throw Error('Enter withdrawal amount');state=await request('/api/withdraw','POST',{amount:a});$('msg').textContent='Withdrawn to Reserve: '+num(a)+' USDT';$('allocation').value='';render()}catch(e){$('msg').textContent=e.message}}")
+withdraw_old = "async function withdrawClick(){try{const a=Number($('withdrawAmount').value);if(!Number.isFinite(a)||a<=0)throw Error('Enter withdrawal amount');state=await request('/api/withdraw','POST',{amount:a});$('msg').textContent='Withdrawn to Reserve: '+num(a)+' USDT';$('withdrawAmount').value='';render()}catch(e){$('msg').textContent=e.message}}"
+withdraw_new = "async function withdrawClick(){try{const a=Number($('allocation').value);if(!Number.isFinite(a)||a<=0)throw Error('Enter withdrawal amount');state=await request('/api/withdraw','POST',{amount:a});$('msg').textContent='Withdrawn to Reserve: '+num(a)+' USDT';$('allocation').value='';render()}catch(e){$('msg').textContent=e.message}}"
+html = html.replace(withdraw_old, withdraw_new)
 
-# Open Positions: compact font and timer only; do not display the word AGE.
+# Open Positions: compact font and timer only.
 html = html.replace('.pos-line{display:grid;', '.pos-line{font-size:12px;display:grid;')
 html = html.replace('.pos-main{white-space:nowrap;', '.pos-main{font-size:12px;white-space:nowrap;')
 html = html.replace('.pos-timer{font-weight:800;', '.pos-timer{font-size:12px;font-weight:800;')
