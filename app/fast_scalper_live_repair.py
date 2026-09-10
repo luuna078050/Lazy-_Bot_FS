@@ -117,52 +117,24 @@ async def engine_repair_final():
             legacy.S['error']=f'Engine: {type(e).__name__}: {e}'; print(f'[ENGINE] {type(e).__name__}: {e}',flush=True); await asyncio.sleep(1)
 legacy.engine=engine_repair_final
 
-# Reference UI: preserve original layout; only slots expand to ten.
-html=legacy.HTML
-html=html.replace('Slots · TOP-6','Slots · TOP-10').replace('AUTO TOP-6','AUTO TOP-10').replace('Array.from({length:6','Array.from({length:10').replace('for(let i=0;i<6;i++)','for(let i=0;i<10;i++)').replace('Maximum 6 pairs','Maximum 10 pairs')
+# The legacy module registers its original engine in its startup hook before
+# this repair layer is imported. Replace that hook so the repaired engine above
+# is the engine that actually runs after deployment.
+async def startup_repaired():
+    RADAR.start()
+    asyncio.create_task(legacy.engine())
+    asyncio.create_task(legacy.radar(True))
+try:
+    legacy.app.router.on_startup = [fn for fn in legacy.app.router.on_startup if getattr(fn, '__name__', '') != 'startup']
+except Exception:
+    pass
+legacy.app.router.on_startup.append(startup_repaired)
 
-# Force the control card into the exact requested mobile/desktop row arrangement:
-# row 1 = Amount + SET BOT BALANCE + WITHDRAW
-# row 2 = profit input + Reinvest
-# row 3 = BOT ON + EMERGENCY + RESET
-# row 4 = BOT OFF + session timer
-layout_fix = r'''<style>
-.fs-control-overlay{display:grid!important;grid-template-columns:minmax(0,1fr) minmax(0,1.45fr) minmax(120px,.8fr);gap:14px;align-items:center;width:100%;}
-.fs-control-overlay .fs-r2{grid-column:1/-1;display:flex;gap:14px;align-items:center;}
-.fs-control-overlay .fs-r2 input{width:calc((100% - 14px)*.5);max-width:260px;box-sizing:border-box;}
-.fs-control-overlay .fs-r2 label{display:flex;align-items:center;gap:10px;font-size:18px;}
-.fs-control-overlay .fs-r3{grid-column:1/-1;display:grid;grid-template-columns:1.2fr 1fr .7fr;gap:14px;align-items:center;}
-.fs-control-overlay .fs-r4{grid-column:1/-1;display:flex;align-items:center;gap:14px;}
-.fs-control-overlay button,.fs-control-overlay input{box-sizing:border-box;min-width:0;}
-@media(max-width:560px){.fs-control-overlay{grid-template-columns:minmax(0,1fr) minmax(0,1.25fr) minmax(105px,.7fr);gap:10px}.fs-control-overlay .fs-r2{gap:10px}.fs-control-overlay .fs-r3{gap:10px}.fs-control-overlay .fs-r4{gap:10px}.fs-control-overlay .fs-r2 input{width:160px;max-width:45vw}.fs-control-overlay .fs-r2 label{font-size:17px;white-space:nowrap}}
-</style><script>
-(function(){
-function t(e){return (e&&e.textContent||'').replace(/\s+/g,' ').trim()}
-function btn(s){return Array.from(document.querySelectorAll('button')).find(e=>t(e).includes(s))}
-function common(nodes){let a=nodes[0];while(a&&a!==document.body){if(nodes.every(n=>a.contains(n)))return a;a=a.parentElement}return null}
-function apply(){
- const set=btn('SET BOT BALANCE'), wd=btn('WITHDRAW'), on=btn('BOT ON'), em=btn('EMERGENCY'), reset=btn('RESET'), off=btn('BOT OFF');
- if(!set||!wd||!on||!em||!reset||!off)return;
- const card=common([set,wd,on,em,reset,off]); if(!card||card.dataset.fsFixed==='1')return;
- const inputs=Array.from(card.querySelectorAll('input')).filter(e=>e.type!=='checkbox');
- const amount=inputs.find(e=>(e.placeholder||'').toLowerCase().includes('amount'))||inputs[0];
- const profit=inputs.find(e=>e!==amount)||inputs[1];
- const cb=card.querySelector('input[type="checkbox"]');
- const reinvest=cb?cb.closest('label'):null;
- const timer=Array.from(card.querySelectorAll('*')).find(e=>e.children.length===0&&/^SESSION\b/i.test(t(e)));
- if(!amount||!profit)return;
- card.dataset.fsFixed='1';
- Array.from(card.children).forEach(e=>e.style.display='none');
- const overlay=document.createElement('div');overlay.className='fs-control-overlay';
- function cell(el,cl){let d=document.createElement('div');if(cl)d.className=cl;d.appendChild(el);return d}
- overlay.appendChild(cell(amount));overlay.appendChild(cell(set));overlay.appendChild(cell(wd));
- const r2=document.createElement('div');r2.className='fs-r2';r2.appendChild(profit);if(reinvest)r2.appendChild(reinvest);overlay.appendChild(r2);
- const r3=document.createElement('div');r3.className='fs-r3';r3.appendChild(on);r3.appendChild(em);r3.appendChild(reset);overlay.appendChild(r3);
- const r4=document.createElement('div');r4.className='fs-r4';r4.appendChild(off);if(timer)r4.appendChild(timer);overlay.appendChild(r4);
- card.appendChild(overlay);
-}
-if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',apply);else apply();
-setTimeout(apply,500);setTimeout(apply,1500);setTimeout(apply,3000);
-})();</script>'''
-html=html.replace('</body>',layout_fix+'</body>') if '</body>' in html else html+layout_fix
+# Reference UI: preserve the existing interface and only change the requested
+# TOP-6 -> TOP-10 slot capacity plus the exact control row arrangement.
+html=legacy.HTML
+old_controls="""<div class=\"card\"><div class=\"row\"><input id=\"allocation\" class=\"input amount\" type=\"number\" step=\"0.01\" min=\"0\" placeholder=\"Amount\"><button type=\"button\" class=\"btn test\" id=\"allocBtn\">SET BOT BALANCE</button><button type=\"button\" class=\"btn stop\" id=\"withdrawBtn\">WITHDRAW</button><input id=\"profit\" class=\"input\" type=\"number\" step=\"0.01\" value=\"0.41\"><label style=\"padding:10px\"><input id=\"reinvest\" type=\"checkbox\" checked> Reinvest</label></div><div class=\"row\" style=\"margin-top:8px\"><button type=\"button\" class=\"btn on\" id=\"onBtn\">BOT ON · ACTIVE</button><button type=\"button\" class=\"btn stop\" id=\"emBtn\">EMERGENCY</button><button type=\"button\" class=\"btn\" id=\"resetBtn\">RESET</button><button type=\"button\" class=\"btn stop\" id=\"offBtn\">BOT OFF</button><span class=\"muted\" id=\"tim\">SESSION 00:00 · 24H 00:00</span></div></div>"""
+new_controls="""<div class=\"card\"><div class=\"row\"><input id=\"allocation\" class=\"input amount\" type=\"number\" step=\"0.01\" min=\"0\" placeholder=\"Amount\"><button type=\"button\" class=\"btn test\" id=\"allocBtn\">SET BOT BALANCE</button><button type=\"button\" class=\"btn stop\" id=\"withdrawBtn\">WITHDRAW</button></div><div class=\"row\" style=\"margin-top:8px\"><input id=\"profit\" class=\"input amount\" type=\"number\" step=\"0.01\" value=\"0.41\"><label style=\"padding:10px\"><input id=\"reinvest\" type=\"checkbox\" checked> Reinvest</label></div><div class=\"row\" style=\"margin-top:8px\"><button type=\"button\" class=\"btn on\" id=\"onBtn\">BOT ON · ACTIVE</button><button type=\"button\" class=\"btn stop\" id=\"emBtn\">EMERGENCY</button><button type=\"button\" class=\"btn\" id=\"resetBtn\">RESET</button></div><div class=\"row\" style=\"margin-top:8px\"><button type=\"button\" class=\"btn stop\" id=\"offBtn\">BOT OFF</button><span class=\"muted\" id=\"tim\">SESSION 00:00 · 24H 00:00</span></div></div>"""
+html=html.replace(old_controls,new_controls)
+html=html.replace('Slots · TOP-6','Slots · TOP-10').replace('AUTO TOP-6','AUTO TOP-10').replace('Array.from({length:6','Array.from({length:10').replace('for(let i=0;i<6;i++)','for(let i=0;i<10;i++)').replace('Maximum 6 pairs','Maximum 10 pairs')
 legacy.HTML=html
