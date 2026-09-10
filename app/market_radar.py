@@ -1,180 +1,104 @@
-"""Fast Scalper market radar.
+"""Low-request Binance market radar.
 
-Radar universe: 100 liquid USDT spot pairs. Selection is driven primarily by
-short-term price movement (30s/1m/2m/4m), controlled volatility and repeatable
-scalp activity. 24h statistics are used only for liquidity/context, not as the
-main directional signal. Pump/reversal behaviour is penalized and exposed as an
-explicit risk warning.
+The scanner deliberately avoids REST polling loops. Binance public market data is
+consumed through one WebSocket connection: all-market mini tickers for the
+universe and kline/aggTrade streams for the currently most liquid USDT pairs.
+This prevents the dashboard from causing the REST 418/429 request flood seen
+with the previous implementation.
 """
 from __future__ import annotations
-
 import json
-import math
 import threading
 import time
-from collections import deque
+from collections import defaultdict, deque
+from statistics import median
 from typing import Any
-
 import websocket
 
 STABLE_BASES={"USDT","USDC","FDUSD","USDE","TUSD","DAI","USD1","USDS","EUR"}
-WS_URLS=("wss://stream.binance.com:9443/ws/!miniTicker@arr","wss://stream.binance.com:443/ws/!miniTicker@arr","wss://data-stream.binance.vision/ws/!miniTicker@arr")
-UNIVERSE_SIZE=100
-HISTORY_SECONDS=300
+FALLBACK=["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","TRXUSDT","LINKUSDT","AVAXUSDT","SUIUSDT","TONUSDT","LTCUSDT","DOTUSDT","BCHUSDT","NEARUSDT","APTUSDT","ATOMUSDT","UNIUSDT","FILUSDT"]
 
 class MarketRadar:
-    def __init__(self,top_n:int=15):
-        self.top_n=top_n; self.lock=threading.RLock(); self.tickers:dict[str,dict[str,Any]]={}; self.history:dict[str,deque[tuple[float,float]]]={}; self.symbols:tuple[str,...]=(); self.last_error=None; self.last_update=0.0; self.connected=False; self.url=""; self._ws=None; self._stop=threading.Event(); self._thread=None; self._universe_loaded_at=0.0
-
-    def _refresh_universe(self,force=False):
-        now=time.time()
-        if not force and self.symbols and now-self._universe_loaded_at<60:return
-        with self.lock:
-            candidates=[]
-            for s,d in self.tickers.items():
-                if not s.endswith("USDT") or s[:-4] in STABLE_BASES:continue
-                try:q=float(d.get("q",0) or 0)
-                except (TypeError,ValueError):q=0.0
-                if q>0:candidates.append((q,s.lower()))
-            candidates.sort(reverse=True); symbols=tuple(s for _,s in candidates[:UNIVERSE_SIZE])
-            if symbols:
-                self.symbols=symbols
-                for s in symbols:self.history.setdefault(s.upper(),deque(maxlen=360))
-                self._universe_loaded_at=now; print(f"[RADAR] universe refreshed: {len(symbols)} USDT pairs",flush=True)
-
+    def __init__(self, top_n:int=20):
+        self.top_n=top_n; self.lock=threading.RLock(); self.tickers={}; self.bars=defaultdict(lambda:deque(maxlen=60)); self.pulses=defaultdict(lambda:deque(maxlen=20)); self._ws=None; self._stop=threading.Event(); self._thread=None; self.last_error=None; self.last_update=0.0
     def start(self):
-        if self._thread and self._thread.is_alive():return
-        self._stop.clear(); self._thread=threading.Thread(target=self._run,daemon=True,name="fast-scalper-market-radar"); self._thread.start()
-
+        if self._thread and self._thread.is_alive(): return
+        self._thread=threading.Thread(target=self._run,daemon=True,name="fast-scalper-market-radar"); self._thread.start()
     def stop(self):
-        self._stop.set();self.connected=False; ws=self._ws
-        if ws:
-            try:ws.close()
+        self._stop.set()
+        if self._ws:
+            try:self._ws.close()
             except Exception:pass
-        self._ws=None
-
+    def _top_symbols(self):
+        with self.lock:
+            rows=[(s,d) for s,d in self.tickers.items() if s.endswith("USDT") and s[:-4] not in STABLE_BASES and float(d.get("q",0) or 0)>=10000]
+        rows.sort(key=lambda x:float(x[1].get("q",0) or 0),reverse=True)
+        return [s for s,_ in rows[:self.top_n]] or FALLBACK[:self.top_n]
     def _run(self):
         while not self._stop.is_set():
-            got_data=False
-            for url in WS_URLS:
-                if self._stop.is_set():break
-                try:
-                    self.url=url;self.last_error=None
-                    ws=websocket.WebSocketApp(url,on_open=self._on_open,on_message=self._on_message,on_error=self._on_error,on_close=self._on_close); self._ws=ws
-                    ws.run_forever(ping_interval=20,ping_timeout=10,ping_payload="fs",suppress_origin=True,http_proxy_host=None,http_proxy_port=None)
-                    if self.last_update>0:got_data=True;break
-                except Exception as exc:
-                    self.connected=False;self.last_error=f"{type(exc).__name__}: {exc}"[:240];print(f"[RADAR] {self.last_error}",flush=True)
-                finally:self.connected=False;self._ws=None
-            if not self._stop.is_set():time.sleep(1 if got_data else 2)
-
-    def _on_open(self,ws):
-        self.connected=True;self.last_error=None;print(f"[RADAR] connected {self.url}; mini-ticker all-market stream",flush=True)
-    def _on_close(self,_ws,code,msg):
-        self.connected=False
-        if code or msg:self.last_error=f"closed {code}: {msg}"[:240];print(f"[RADAR] {self.last_error}",flush=True)
-    def _on_error(self,_ws,error):
-        self.connected=False;self.last_error=str(error)[:240];print(f"[RADAR] websocket error: {self.last_error}",flush=True)
-
-    def _store_ticker(self,data):
-        if not isinstance(data,dict):return
-        s=str(data.get("s","")).upper()
-        if not s.endswith("USDT") or s[:-4] in STABLE_BASES:return
-        try:px=float(data.get("c",0) or 0)
-        except (TypeError,ValueError):return
-        if px<=0:return
-        now=time.time()
-        with self.lock:
-            self.tickers[s]=data; h=self.history.setdefault(s,deque(maxlen=360)); h.append((now,px)); cutoff=now-HISTORY_SECONDS
-            while h and h[0][0]<cutoff:h.popleft()
-            self.last_update=now
-
+            symbols=self._top_symbols()
+            streams=["!miniTicker@arr"]+[f"{s.lower()}@kline_3m" for s in symbols]+[f"{s.lower()}@aggTrade" for s in symbols]
+            url="wss://stream.binance.com:9443/stream?streams="+"/".join(streams)
+            try:
+                self._ws=websocket.WebSocketApp(url,on_message=self._on_message,on_error=self._on_error)
+                self._ws.run_forever(ping_interval=15,ping_timeout=10)
+            except Exception as exc:self.last_error=str(exc)[:240]
+            if not self._stop.is_set():time.sleep(1)
+    def _on_error(self,_ws,error): self.last_error=str(error)[:240]
     def _on_message(self,_ws,raw):
         try:
-            msg=json.loads(raw)
-            if isinstance(msg,list):
-                for data in msg:self._store_ticker(data)
-            else:self._store_ticker(msg.get("data",msg) if isinstance(msg,dict) else None)
-            self._refresh_universe()
-        except Exception as exc:
-            self.last_error=f"message: {exc}"[:240];print(f"[RADAR] {self.last_error}",flush=True)
-
-    @staticmethod
-    def _return(h,price,now,seconds):
-        if not h:return 0.0
-        target=now-seconds;old=None
-        for ts,px in h:
-            if ts<=target:old=px
-            else:break
-        if old is None:old=h[0][1]
-        return (price/old-1)*100 if old else 0.0
-
-    @staticmethod
-    def _volatility(h,now):
-        if not h or len(h)<8:return 0.0
-        pts=[(ts,px) for ts,px in h if ts>=now-120 and px>0]
-        if len(pts)<8:return 0.0
-        returns=[];prev=pts[0][1]
-        for _,px in pts[1:]:
-            if prev>0:returns.append((px/prev-1)*100)
-            prev=px
-        if len(returns)<5:return 0.0
-        mean=sum(returns)/len(returns); return math.sqrt(sum((x-mean)**2 for x in returns)/len(returns))*math.sqrt(max(1,len(returns)))
-
-    @staticmethod
-    def _activity(h,now):
-        if not h:return 0.0
-        pts=[(ts,px) for ts,px in h if ts>=now-240 and px>0]
-        if len(pts)<5:return 0.0
-        moves=[];prev=pts[0][1]
-        for _,px in pts[1:]:
-            if prev>0:moves.append(abs(px/prev-1)*100)
-            prev=px
-        if not moves:return 0.0
-        active=sum(1 for x in moves if x>=0.01); return min(1.0,(active/max(1,len(moves)))*3.0)
-
-    @staticmethod
-    def _risk(m30,m60,m120,m240,vol,activity):
-        peak=max(abs(m30),abs(m60),abs(m120),abs(m240));acceleration=max(0.0,abs(m30)*2-abs(m120));one_sided=(m30>0 and m60>0 and m120>0) or (m30<0 and m60<0 and m120<0)
-        if peak>=3.0 or acceleration>=1.5:return "EXTREME","SPIKE/PUMP RISK"
-        if peak>=1.5 and one_sided:return "HIGH","HIGH VOLATILITY"
-        if vol>=0.8 and activity<0.30:return "HIGH","ERRATIC VOLATILITY"
-        if vol>=0.35:return "MEDIUM","HIGH VOLATILITY"
-        return "LOW",""
-
-    def snapshot(self,limit=15):
-        self.start();deadline=time.time()+8
-        while time.time()<deadline:
-            with self.lock:
-                if self.tickers:break
-            time.sleep(.15)
-        self._refresh_universe(force=True);now=time.time()
-        with self.lock:symbols=list(self.symbols);items=[(s,self.tickers.get(s.upper(),{})) for s in symbols]
-        rows=[]
-        for s,d in items:
-            if not d:continue
-            try:
-                price=float(d.get("c",0) or 0);open_price=float(d.get("o",price) or price);vol24=float(d.get("q",0) or 0);pct24=(price/open_price-1)*100 if price and open_price else 0.0
-            except (TypeError,ValueError,ZeroDivisionError):continue
-            with self.lock:
-                hist=self.history.get(s.upper());h=list(hist) if hist else [];history_age=(now-h[0][0]) if h else 0.0
-            if not h or history_age<20:continue
-            m30=self._return(h,price,now,30);m60=self._return(h,price,now,60);m120=self._return(h,price,now,120);m240=self._return(h,price,now,240);vol=self._volatility(h,now);activity=self._activity(h,now);risk,risk_warning=self._risk(m30,m60,m120,m240,vol,activity)
-            liquidity=min(1.0,max(0.0,math.log10(max(vol24,1))/10));impulse=min(1.0,max(0.0,abs(m60))/0.8);persistence=min(1.0,max(0.0,(abs(m30)+abs(m60)+abs(m120))/2.4));controlled_vol=min(1.0,max(0.0,vol/0.8));risk_penalty={"LOW":1.0,"MEDIUM":0.88,"HIGH":0.58,"EXTREME":0.15}[risk]
-            direction=1 if m60>0 else (-1 if m60<0 else 0);directional_quality=min(1.0,max(0.0,(direction*m30+direction*m60+direction*m120)/1.2)) if direction else 0.0
-            # Approved Radar scoring weights: Scalp Activity 40%, Impulse 22%, Persistence 16%, Controlled Volatility 12%, Liquidity 7%, Directional Quality 3%.
-            score=100*(0.40*activity+0.22*impulse+0.16*persistence+0.12*controlled_vol+0.07*liquidity+0.03*directional_quality)*risk_penalty
-            signal="BUY" if score>=55 and m30>0 and m60>0 and risk!="EXTREME" else ("WATCH" if score>=35 else "WAIT")
-            target_pct=min(0.006,max(0.0035,abs(m60)/100*0.8))
-            rows.append({"symbol":s[:-4]+"/USDT","price":price,"change_24h_pct":round(pct24,3),"quote_volume_24h":vol24,"score":round(score,2),"signal":signal,"tf":"1-4m","estimated_entry":price,"estimated_exit":price*(1+target_pct),"estimated_stop":price*(1-0.002),"change_3m_pct":round(m120,4),"change_30s_pct":round(m30,4),"change_1m_pct":round(m60,4),"change_2m_pct":round(m120,4),"change_4m_pct":round(m240,4),"volatility":round(vol,4),"scalp_activity":round(activity,3),"volume_ratio":round(liquidity,3),"pump_events":1 if risk=="EXTREME" else 0,"pump_score":round(max(0.0,abs(m30)*0.5+max(0.0,abs(m30)*2-abs(m120))),3),"risk":risk,"risk_warning":risk_warning,"hold_seconds":60,"history_age":round(history_age,1),"universe_size":len(symbols),"target_pct":round(target_pct*100,3)})
-        rows.sort(key=lambda x:(x["signal"]=="BUY",x["score"],abs(x["change_1m_pct"]),x["scalp_activity"],x["quote_volume_24h"]),reverse=True)
-        return rows[:int(limit)]
-
-    def price(self,symbol):
-        s=symbol.upper().replace('/','')
+            msg=json.loads(raw); data=msg.get("data",msg)
+            event=data.get("e")
+            if isinstance(data,list):
+                for row in data:self._mini(row)
+                return
+            if event=="24hrMiniTicker":self._mini(data); return
+            if event=="kline":self._kline(data); return
+            if event=="aggTrade":self._trade(data)
+        except Exception: return
+    def _mini(self,d):
+        s=str(d.get("s","")).upper()
+        if not s:return
+        with self.lock:self.tickers[s]=dict(d);self.last_update=time.time()
+    def _kline(self,d):
+        k=d.get("k",{});s=str(k.get("s","")).upper()
+        if not s:return
+        row={"ts":float(k.get("t",0))/1000,"open":float(k.get("o",0) or 0),"high":float(k.get("h",0) or 0),"low":float(k.get("l",0) or 0),"close":float(k.get("c",0) or 0),"quote_volume":float(k.get("q",0) or 0),"closed":bool(k.get("x"))}
         with self.lock:
-            d=self.tickers.get(s)
-            try:return float(d.get("c",0) or 0) if d else 0.0
-            except (TypeError,ValueError):return 0.0
+            bars=self.bars[s]
+            if bars and bars[-1]["ts"]==row["ts"]:bars[-1]=row
+            else:bars.append(row)
+    def _trade(self,d):
+        s=str(d.get("s","")).upper();p=float(d.get("p",0) or 0);q=float(d.get("q",0) or 0)
+        if not s or p<=0:return
+        now=int(time.time());buy=not bool(d.get("m",False));quote=p*q
+        with self.lock:
+            h=self.pulses[s]
+            if h and h[-1]["sec"]==now:b=h[-1]
+            else:
+                b={"sec":now,"price":p,"quote":0.0,"buy_quote":0.0,"trades":0};h.append(b)
+            b["price"]=p;b["quote"]+=quote;b["buy_quote"]+=quote if buy else 0;b["trades"]+=1
+    def _pulse(self,s):
+        with self.lock:h=list(self.pulses.get(s,()))
+        if not h:return {"pump_events":0,"pump_score":0.0,"signal":"WAIT","change_3m_pct":0.0,"volume_ratio":1.0,"hold_seconds":180}
+        prices=[x["price"] for x in h]; latest=prices[-1]
+        def ch(n):return (latest/prices[-1-n]-1)*100 if len(prices)>n and prices[-1-n]>0 else 0.0
+        vols=[x["quote"] for x in h];base=median(vols[:-1]) if len(vols)>2 else 0;vr=vols[-1]/base if base>0 else 1.0;br=h[-1]["buy_quote"]/h[-1]["quote"] if h[-1]["quote"] else .5
+        events=sum(1 for i in range(1,len(h)) if h[i]["quote"]>max(1,median([x["quote"] for x in h[max(0,i-5):i]]))*1.8 and (h[i]["price"]/h[i-1]["price"]-1)>=.001)
+        c3=ch(3);score=min(1.0,.40*min(1,max(0,c3)/1.2)+.35*min(1,max(0,vr-1)/4)+.25*max(0,min(1,(br-.5)/.35)))
+        signal="PUMP_NOW" if c3>=.4 and vr>=1.8 and br>=.56 and score>=.5 else "PUMP_HISTORY" if events>=2 else "NORMAL"
+        return {"pump_events":events,"pump_score":round(score,3),"signal":signal,"change_3m_pct":round(c3,4),"volume_ratio":round(vr,2),"hold_seconds":20 if signal=="PUMP_NOW" else 180}
+    def snapshot(self,limit=20):
+        self.start()
+        with self.lock:items=list(self.tickers.items())
+        items=[(s,d) for s,d in items if s.endswith("USDT") and s[:-4] not in STABLE_BASES]
+        items.sort(key=lambda x:float(x[1].get("q",0) or 0),reverse=True)
+        rows=[]
+        for s,d in items[:limit]:
+            price=float(d.get("c",0) or 0);pct=(price/float(d.get("o",price) or price)-1)*100 if price else 0;vol=float(d.get("q",0) or 0);pm=self._pulse(s)
+            liquidity=min(1.0,max(0.0,__import__('math').log10(max(vol,1))/8));momentum=min(1.0,max(0,pct)/20);score=100*(.35*pm["pump_score"]+.25*momentum+.25*liquidity+.15*min(1,max(0,pm["change_3m_pct"])/1.2))
+            entry=price; target_pct=min(.012,max(.0035,abs(pm["change_3m_pct"])/100*(1.25 if pm["signal"]=="PUMP_NOW" else .8))); rows.append({"symbol":s[:-4]+"/USDT","price":price,"change_24h_pct":round(pct,3),"quote_volume_24h":vol,"score":round(score,2),"estimated_entry":entry,"estimated_exit":entry*(1+target_pct),"estimated_stop":entry*(1-.006 if pm["signal"]=="PUMP_NOW" else .004),**pm})
+        rows.sort(key=lambda x:(x["score"],x["quote_volume_24h"]),reverse=True)
+        return rows
 
-RADAR=MarketRadar(15)
+RADAR=MarketRadar(20)
