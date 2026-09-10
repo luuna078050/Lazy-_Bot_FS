@@ -47,7 +47,7 @@ async def open_pos_fast(i, s):
     if not s:
         return
     symbol = str(s).upper().replace('/', '')
-    if any(str(p.get('symbol','')).upper().replace('/','') == symbol for p in legacy.S.get('positions', [])):
+    if any(str(p.get('symbol','')).upper().replace('/', '') == symbol for p in legacy.S.get('positions', [])):
         return
     async with _open_lock:
         n = sum(1 for x in legacy.S.get('slots', []) if x)
@@ -115,3 +115,24 @@ async def engine_repair():
 
 legacy.open_pos = open_pos_fast
 legacy.engine = engine_repair
+
+# Emergency must stop the entry engine BEFORE any position is closed.
+# The previous endpoint set running=False only after the close loop. While
+# Binance SELL requests were in flight, the engine saw free slots and opened
+# replacement positions. That is the exact race seen in the Render logs.
+for _r in list(legacy.app.router.routes):
+    if getattr(_r, 'path', None) == '/api/paper/emergency' and 'POST' in (getattr(_r, 'methods', set()) or set()):
+        legacy.app.router.routes.remove(_r)
+
+@legacy.app.post('/api/paper/emergency')
+async def emergency_fixed():
+    legacy.S['running'] = False
+    legacy.S['stop_requested'] = None
+    print(f'[BOT] EMERGENCY requested positions={len(legacy.S.get("positions", []))}', flush=True)
+    for p in list(legacy.S.get('positions', [])):
+        try:
+            await legacy.close(p, 'EMERGENCY_STOP')
+        except Exception as e:
+            legacy.S['error'] = f'Close {p.get("symbol")}: {type(e).__name__}: {e}'
+    legacy.S['session_started'] = None
+    return await legacy.state()
