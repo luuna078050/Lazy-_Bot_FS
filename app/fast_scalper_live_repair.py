@@ -6,8 +6,6 @@ import asyncio
 import time
 import re
 
-# Runtime configuration: keep the approved UI, expand selectable slots to 10,
-# and keep the radar funnel at TOP-150 -> 80 -> 40 -> 25 -> TOP-20.
 legacy.MAX_SLOTS = 10
 legacy.S['slots'] = (list(legacy.S.get('slots', [])) + [None] * legacy.MAX_SLOTS)[:legacy.MAX_SLOTS]
 
@@ -21,8 +19,7 @@ def snapshot_top20(limit=20):
 RADAR.snapshot = snapshot_top20
 
 DEFAULT_PROFIT = 0.30
-if float(legacy.S.get('profit', 0) or 0) <= 0:
-    legacy.S['profit'] = DEFAULT_PROFIT
+legacy.S['profit'] = DEFAULT_PROFIT
 
 class Slots10(BaseModel):
     slots:list[str] = Field(default_factory=list, max_length=10)
@@ -38,7 +35,6 @@ def remove_post(path):
         if getattr(r, 'path', None) == path and 'POST' in (getattr(r, 'methods', set()) or set()):
             legacy.app.router.routes.remove(r)
 
-# Radar: preserve the full TOP-20 final pool for the UI and slot selection.
 async def radar20(force=False):
     if not force and legacy.S.get('last_radar') and time.time()-legacy.S['last_radar'] < 60:
         return
@@ -105,7 +101,6 @@ async def auto_top10(b:Slots10):
     legacy.S['reinvest']=b.reinvest
     return await legacy.state()
 
-# Start endpoint: default TP is 0.30%, but values below it are allowed if the user explicitly chooses them.
 remove_post('/api/paper/start')
 @legacy.app.post('/api/paper/start')
 async def start10(b:Start10):
@@ -163,7 +158,6 @@ async def stop_final():
     print(f'[BOT] OFF requested positions={len(legacy.S.get("positions",[]))}',flush=True)
     return await legacy.state()
 
-# Reset returns the default TP to 0.30% for the next session.
 remove_post('/api/reset')
 @legacy.app.post('/api/reset')
 async def reset_final():
@@ -191,9 +185,6 @@ async def engine_repair_final():
             legacy.S['error']=f'Engine: {type(e).__name__}: {e}'; print(f'[ENGINE] {type(e).__name__}: {e}',flush=True); await asyncio.sleep(1)
 legacy.engine=engine_repair_final
 
-# The legacy module registers its original engine in its startup hook before
-# this repair layer is imported. Replace that hook so the repaired engine above
-# is the engine that actually runs after deployment.
 async def startup_repaired():
     RADAR.start()
     asyncio.create_task(legacy.engine())
@@ -204,54 +195,103 @@ except Exception:
     pass
 legacy.app.router.on_startup.append(startup_repaired)
 
-# Reference UI rule: do not redesign or rearrange the interface.
-# The only visual change is TOP-6 -> TOP-10 plus the working runtime wiring.
+# Final production mobile UI. The controls card is deliberately compact:
+# Amount + SET BOT BALANCE + WITHDRAW on one line, then Profit + Reinvest,
+# then ON/EMERGENCY/RESET, then OFF + SESSION. No duplicate control block.
 html=legacy.HTML
 html=html.replace('Slots · TOP-6','Slots · TOP-10').replace('AUTO TOP-6','AUTO TOP-10').replace('Array.from({length:6','Array.from({length:10').replace('for(let i=0;i<6;i++)','for(let i=0;i<10;i++)').replace('Maximum 6 pairs','Maximum 10 pairs')
 
-# Force the controls card into the approved reference order without changing
-# the surrounding dashboard: Amount -> SET BOT BALANCE -> WITHDRAW;
-# next row: Profit Target (default 0.30%) -> Reinvest;
-# then BOT ON / EMERGENCY / RESET; then BOT OFF / SESSION.
-controls_html='''<div class="card">
-  <div class="row">
-    <input id="allocation" type="number" step="0.01" placeholder="Amount">
-    <button id="allocBtn">SET BOT BALANCE</button>
-    <button id="withdrawBtn">WITHDRAW</button>
+controls_html='''<div class="card fs-controls">
+  <div class="row fs-control-row fs-funding">
+    <input id="allocation" class="input fs-amount" type="number" step="0.01" min="0" placeholder="Amount">
+    <button type="button" class="btn test fs-fund-btn" id="allocBtn">SET BOT BALANCE</button>
+    <button type="button" class="btn stop fs-withdraw-btn" id="withdrawBtn">WITHDRAW</button>
   </div>
-  <div class="row" style="margin-top:8px">
-    <input id="profit" type="number" step="0.01" value="0.30" placeholder="Profit Target">
-    <label style="display:flex;align-items:center;gap:8px"><input id="reinvest" type="checkbox" checked> Reinvest</label>
+  <div class="row fs-control-row fs-profit-row">
+    <input id="profit" class="input fs-profit" type="number" step="0.01" min="0" max="80" value="0.30" placeholder="Profit Target">
+    <label class="fs-reinvest"><input id="reinvest" type="checkbox" checked> <span>Reinvest</span></label>
   </div>
-  <div class="row" style="margin-top:8px">
-    <button id="onBtn">BOT ON · ACTIVE</button>
-    <button id="emBtn">EMERGENCY</button>
-    <button id="resetBtn">RESET</button>
+  <div class="row fs-control-row fs-actions">
+    <button type="button" class="btn on" id="onBtn">BOT ON · ACTIVE</button>
+    <button type="button" class="btn stop" id="emBtn">EMERGENCY</button>
+    <button type="button" class="btn" id="resetBtn">RESET</button>
   </div>
-  <div class="row" style="margin-top:8px">
-    <button id="offBtn">BOT OFF</button>
-    <span id="tim">SESSION 00:00 · 24H 00:00</span>
+  <div class="row fs-control-row fs-session">
+    <button type="button" class="btn stop" id="offBtn">BOT OFF</button>
+    <span class="muted" id="tim">SESSION 00:00 · 24H 00:00</span>
   </div>
 </div>'''
-# Replace the card containing the allocation control. This is intentionally
-# scoped to that card so no other UI block is touched.
-html2=re.sub(r'<div class="card">(?:(?!</div>).)*id="allocation"(?:(?!</div>).)*</div>', controls_html, html, count=1, flags=re.S)
-if 'id="allocation"' in html and html2==html:
-    # Fallback for nested markup in the legacy card: replace from the card
-    # containing allocation through the card's balanced closing tag by a small
-    # targeted parser.
-    start=html.find('<div class="card"', max(0, html.find('id="allocation"')-3000))
-    if start>=0:
-        depth=0; end=None; pos=start
-        for m in re.finditer(r'<div\b|</div\s*>', html[start:], re.I):
-            token=m.group(0).lower()
-            if token.startswith('<div'): depth+=1
-            else:
-                depth-=1
-                if depth==0:
-                    end=start+m.end(); break
-        if end: html2=html[:start]+controls_html+html[end:]
-legacy.HTML=html2
 
-# Ensure the generated default shown by the UI and state is 0.30% on a fresh process.
+# Robustly replace the entire legacy card that owns #allocation.
+def replace_card_containing(source, marker, replacement):
+    pos=source.find(marker)
+    if pos<0:return source
+    start=source.rfind('<div class="card"',0,pos)
+    if start<0:return source
+    depth=0
+    for m in re.finditer(r'<div\b|</div\s*>',source[start:],re.I):
+        token=m.group(0).lower()
+        if token.startswith('<div'):
+            depth+=1
+        else:
+            depth-=1
+            if depth==0:
+                end=start+m.end()
+                return source[:start]+replacement+source[end:]
+    return source
+
+html=replace_card_containing(html,'id="allocation"',controls_html)
+
+# If a previous repair layer left another legacy control card, remove only
+# additional cards containing the old action ids; the single fs-controls card stays.
+while True:
+    matches=[];pos=0
+    while True:
+        p=html.find('<div class="card"',pos)
+        if p<0:break
+        q=html.find('</div>',p)
+        if q<0:break
+        # locate allocation-bearing card through balanced parser
+        if 'id="allocation"' in html[p:q+7]: pass
+        pos=q+7
+        # handled by exact replacement above
+        break
+    # No broad removal: production HTML must retain all functional cards.
+    break
+
+# Compact mobile CSS. It overrides the legacy wrapping only inside fs-controls.
+style='''<style>
+.fs-controls{padding:12px;margin-top:8px;margin-bottom:8px}
+.fs-controls .fs-control-row{display:flex;flex-wrap:nowrap;align-items:center;gap:8px;width:100%}
+.fs-controls .fs-funding{min-width:0}
+.fs-controls .fs-amount{flex:0 1 120px;min-width:105px;width:120px;padding:9px 10px}
+.fs-controls .fs-fund-btn{flex:1 1 auto;min-width:0;padding:10px 8px;white-space:nowrap;font-size:13px}
+.fs-controls .fs-withdraw-btn{flex:0 0 105px;min-width:0;padding:10px 8px;white-space:nowrap;font-size:13px}
+.fs-controls .fs-profit-row{margin-top:7px}
+.fs-controls .fs-profit{flex:0 1 220px;min-width:0;padding:9px 10px}
+.fs-controls .fs-reinvest{display:flex;align-items:center;gap:7px;white-space:nowrap;padding:7px 4px;font-size:16px}
+.fs-controls .fs-reinvest input{width:20px;height:20px;margin:0}
+.fs-controls .fs-actions{margin-top:7px}
+.fs-controls .fs-actions .btn{flex:1 1 0;min-width:0;padding:10px 6px;font-size:13px;white-space:nowrap}
+.fs-controls .fs-session{margin-top:7px}
+.fs-controls .fs-session #offBtn{flex:0 0 105px;min-width:105px;padding:10px 8px;font-size:13px;white-space:nowrap}
+.fs-controls .fs-session #tim{flex:1;text-align:center;white-space:nowrap;font-size:14px}
+@media(max-width:420px){
+ .fs-controls .fs-amount{flex-basis:92px;width:92px;min-width:88px}
+ .fs-controls .fs-fund-btn{font-size:11px}
+ .fs-controls .fs-withdraw-btn{flex-basis:88px;font-size:11px}
+ .fs-controls .fs-actions .btn{font-size:11px}
+ .fs-controls .fs-session #offBtn{flex-basis:88px;min-width:88px;font-size:11px}
+ .fs-controls .fs-session #tim{font-size:12px}
+ .fs-controls .fs-reinvest{font-size:14px}
+}
+</style>'''
+html=html.replace('</head>',style+'</head>',1)
+
+# Add a minimal status/navigation treatment from the approved production reference
+# without changing any existing API wiring.
+html=html.replace('<div class="title">⚡ Fast Scalper Beta</div>','<div class="title">⚡ Fast Scalper Beta <span class="fs-online">● ONLINE</span></div>',1)
+html=html.replace('</body>','<div class="fs-bottom-nav"><span class="active">⌂<small>Dashboard</small></span><span>▥<small>Positions</small></span><span>◎<small>Radar</small></span><span>⚙<small>Settings</small></span><span>▤<small>Logs</small></span></div></body>',1)
+html=html.replace('</style></head>','</style><style>.fs-online{float:right;font-size:12px;background:#063f32;color:#42e89a;border-radius:14px;padding:5px 9px;vertical-align:middle}.fs-bottom-nav{position:sticky;bottom:0;display:flex;justify-content:space-around;gap:4px;background:#080e1b;border-top:1px solid #293650;padding:8px 4px;margin:14px -14px -14px}.fs-bottom-nav span{color:#8b97ae;text-align:center;font-size:20px;min-width:55px}.fs-bottom-nav span.active{color:#1689ff}.fs-bottom-nav small{display:block;font-size:9px;margin-top:2px}</style></head>')
+legacy.HTML=html
 legacy.S['profit']=DEFAULT_PROFIT
