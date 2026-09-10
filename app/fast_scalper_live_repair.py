@@ -9,6 +9,10 @@ try:
     html, n = block.subn(desired, html, count=1)
     if n:
         legacy.HTML = html
+    # The previous patch used a separate withdrawal field. The approved UI uses
+    # the single Amount field for either SET BOT BALANCE or WITHDRAW.
+    legacy.HTML = legacy.HTML.replace("Number($('withdrawAmount').value)", "Number($('allocation').value)")
+    legacy.HTML = legacy.HTML.replace("$('withdrawAmount').value=''", "$('allocation').value=''")
 except Exception as e:
     legacy.S['error'] = f'UI repair: {type(e).__name__}: {e}'
 
