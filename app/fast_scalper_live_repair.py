@@ -130,11 +130,8 @@ except Exception:
     pass
 legacy.app.router.on_startup.append(startup_repaired)
 
-# Reference UI: preserve the existing interface and only change the requested
-# TOP-6 -> TOP-10 slot capacity plus the exact control row arrangement.
+# Reference UI rule: do not redesign or rearrange the interface.
+# The only visual change here is expanding the existing six-slot block to ten slots.
 html=legacy.HTML
-old_controls="""<div class=\"card\"><div class=\"row\"><input id=\"allocation\" class=\"input amount\" type=\"number\" step=\"0.01\" min=\"0\" placeholder=\"Amount\"><button type=\"button\" class=\"btn test\" id=\"allocBtn\">SET BOT BALANCE</button><button type=\"button\" class=\"btn stop\" id=\"withdrawBtn\">WITHDRAW</button><input id=\"profit\" class=\"input\" type=\"number\" step=\"0.01\" value=\"0.41\"><label style=\"padding:10px\"><input id=\"reinvest\" type=\"checkbox\" checked> Reinvest</label></div><div class=\"row\" style=\"margin-top:8px\"><button type=\"button\" class=\"btn on\" id=\"onBtn\">BOT ON · ACTIVE</button><button type=\"button\" class=\"btn stop\" id=\"emBtn\">EMERGENCY</button><button type=\"button\" class=\"btn\" id=\"resetBtn\">RESET</button><button type=\"button\" class=\"btn stop\" id=\"offBtn\">BOT OFF</button><span class=\"muted\" id=\"tim\">SESSION 00:00 · 24H 00:00</span></div></div>"""
-new_controls="""<div class=\"card\"><div class=\"row\"><input id=\"allocation\" class=\"input amount\" type=\"number\" step=\"0.01\" min=\"0\" placeholder=\"Amount\"><button type=\"button\" class=\"btn test\" id=\"allocBtn\">SET BOT BALANCE</button><button type=\"button\" class=\"btn stop\" id=\"withdrawBtn\">WITHDRAW</button></div><div class=\"row\" style=\"margin-top:8px\"><input id=\"profit\" class=\"input amount\" type=\"number\" step=\"0.01\" value=\"0.41\"><label style=\"padding:10px\"><input id=\"reinvest\" type=\"checkbox\" checked> Reinvest</label></div><div class=\"row\" style=\"margin-top:8px\"><button type=\"button\" class=\"btn on\" id=\"onBtn\">BOT ON · ACTIVE</button><button type=\"button\" class=\"btn stop\" id=\"emBtn\">EMERGENCY</button><button type=\"button\" class=\"btn\" id=\"resetBtn\">RESET</button></div><div class=\"row\" style=\"margin-top:8px\"><button type=\"button\" class=\"btn stop\" id=\"offBtn\">BOT OFF</button><span class=\"muted\" id=\"tim\">SESSION 00:00 · 24H 00:00</span></div></div>"""
-html=html.replace(old_controls,new_controls)
 html=html.replace('Slots · TOP-6','Slots · TOP-10').replace('AUTO TOP-6','AUTO TOP-10').replace('Array.from({length:6','Array.from({length:10').replace('for(let i=0;i<6;i++)','for(let i=0;i<10;i++)').replace('Maximum 6 pairs','Maximum 10 pairs')
 legacy.HTML=html
