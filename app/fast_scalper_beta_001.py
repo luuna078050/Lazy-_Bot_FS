@@ -104,3 +104,4 @@ $('paperBtn').addEventListener('click',()=>setMode('PAPER'));$('testModeBtn').ad
 from . import fast_scalper_patch
 from . import fast_scalper_live_repair
 from . import fast_scalper_final_patch
+from . import fast_scalper_final_fix2
