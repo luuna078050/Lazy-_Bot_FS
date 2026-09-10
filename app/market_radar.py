@@ -16,7 +16,7 @@ class MarketRadar:
   if self._thread and self._thread.is_alive(): return
   self._stop.clear(); self._thread=threading.Thread(target=self._run,daemon=True,name="fast-scalper-market-radar"); self._thread.start()
  def stop(self):
-  self._stop.set(); self.connected=False
+  self._stop.set(); self.connected=False; self._stream_symbols=()
   if self._ws:
    try:self._ws.close()
    except Exception:pass
@@ -33,8 +33,8 @@ class MarketRadar:
  def _run(self):
   while not self._stop.is_set():
    try:
-    self._stream_symbols=()
-    url=self._build_url()
+    with self.lock:symbols=tuple(self._stream_symbols)
+    url=self._build_url(symbols or None)
     self._ws=websocket.WebSocketApp(url,on_open=self._on_open,on_message=self._on_message,on_error=self._on_error,on_close=self._on_close)
     self._ws.run_forever(ping_interval=15,ping_timeout=10)
    except Exception as exc:
@@ -42,7 +42,9 @@ class MarketRadar:
    if not self._stop.is_set():time.sleep(1.0)
  def _on_open(self,_ws):
   self.connected=True;self.last_error=None;print("RADAR_WS_CONNECTED",flush=True)
-  threading.Thread(target=self._promote_streams,daemon=True,name="radar-stream-promoter").start()
+  with self.lock:has_promoted_streams=bool(self._stream_symbols)
+  if not has_promoted_streams:
+   threading.Thread(target=self._promote_streams,daemon=True,name="radar-stream-promoter").start()
  def _promote_streams(self):
   deadline=time.time()+8
   while not self._stop.is_set() and time.time()<deadline:
