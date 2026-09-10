@@ -5,11 +5,9 @@ from pydantic import BaseModel, Field
 import asyncio
 import time
 
-# TOP-10 slots. The Radar pipeline remains based on the existing TOP-150 universe.
 legacy.MAX_SLOTS = 10
 legacy.S['slots'] = (list(legacy.S.get('slots', [])) + [None] * legacy.MAX_SLOTS)[:legacy.MAX_SLOTS]
 
-# Rotation pool is TOP-20; the underlying TOP-150 -> 80 -> 40 -> 25 stages stay intact.
 import importlib
 _radar_mod = importlib.import_module('.market_radar', package=__package__)
 _radar_mod.FINAL = 20
@@ -26,10 +24,8 @@ class Slots10(BaseModel):
 
 def remove_post(path):
     for r in list(legacy.app.router.routes):
-        if getattr(r, 'path', None) == path and 'POST' in (getattr(r, 'methods', set()) or set()):
-            legacy.app.router.routes.remove(r)
+        if getattr(r, 'path', None) == path and 'POST' in (getattr(r, 'methods', set()) or set()): legacy.app.router.routes.remove(r)
 
-# Replace the old six-slot routes with ten-slot versions.
 remove_post('/api/slots')
 @legacy.app.post('/api/slots')
 async def slots10(b:Slots10):
@@ -72,9 +68,6 @@ async def auto_top10(b:Slots10):
     legacy.S['slots']=target+[None]*(10-len(target));legacy.S['profit']=b.profit_pct;legacy.S['reinvest']=b.reinvest
     return await legacy.state()
 
-# Loss guard: a MARKET SELL can fill below the PT snapshot. If the realized
-# result is negative, it is no longer treated as a normal PT and the symbol is
-# blocked before it can immediately re-enter.
 LOSS_COOLDOWN=60.0
 _previous_manage = legacy.manage
 async def manage_with_loss_guard():
@@ -83,8 +76,7 @@ async def manage_with_loss_guard():
     from . import fast_scalper_antloss as anti
     for item in list(legacy.S.get('closed',[])):
         if str(item.get('id')) in before: continue
-        pnl=float(item.get('pnl') or 0.0)
-        reason=item.get('reason')
+        pnl=float(item.get('pnl') or 0.0); reason=item.get('reason')
         if pnl < -1e-9 and reason=='PROFIT_TARGET':
             item['reason']='LOSS_AFTER_PT'
             symbol=str(item.get('symbol','')).upper().replace('/','')
@@ -92,72 +84,48 @@ async def manage_with_loss_guard():
             print(f'[TRADE] LOSS_GUARD {symbol} realized_pnl={pnl:.6f} cooldown={LOSS_COOLDOWN:.0f}s',flush=True)
 legacy.manage=manage_with_loss_guard
 
-# Session timer: BOT OFF stops new entries immediately. Existing positions may
-# finish under the existing grace period. The session clock freezes only after
-# the final position is closed, exactly as requested.
 def freeze_session_if_stopped():
     if legacy.S.get('stop_requested') and not legacy.S.get('positions'):
         started=legacy.S.get('session_started')
         if started:
-            try:
-                legacy.S['session_elapsed']=max(0.0,time.time()-legacy.datetime.fromisoformat(started).timestamp())
+            try: legacy.S['session_elapsed']=max(0.0,time.time()-legacy.datetime.fromisoformat(started).timestamp())
             except Exception: pass
-        legacy.S['session_started']=None
-        legacy.S['stop_requested']=None
+        legacy.S['session_started']=None; legacy.S['stop_requested']=None
 
 remove_post('/api/paper/stop')
 @legacy.app.post('/api/paper/stop')
 async def stop_final():
-    legacy.S['running']=False
-    legacy.S['stop_requested']=time.time() if legacy.S.get('positions') else None
-    freeze_session_if_stopped()
+    legacy.S['running']=False; legacy.S['stop_requested']=time.time() if legacy.S.get('positions') else None; freeze_session_if_stopped()
     print(f'[BOT] OFF requested positions={len(legacy.S.get("positions",[]))}',flush=True)
     return await legacy.state()
 
-# Keep the current repaired engine, but make it call the loss-guarded manager
-# and freeze the session as soon as the last position disappears.
 async def engine_repair_final():
     from . import fast_scalper_antloss as anti
     asyncio.create_task(anti._radar_loop())
     while True:
         try:
             if legacy.S.get('running') or legacy.S.get('stop_requested'):
-                await legacy.manage()
-                freeze_session_if_stopped()
+                await legacy.manage(); freeze_session_if_stopped()
             if legacy.S.get('running'):
-                positions=legacy.S.get('positions',[])
-                occupied_slots={p.get('slot') for p in positions}
-                occupied_symbols={str(p.get('symbol','')).upper().replace('/','') for p in positions}
-                tasks=[]
+                positions=legacy.S.get('positions',[]); occupied_slots={p.get('slot') for p in positions}; occupied_symbols={str(p.get('symbol','')).upper().replace('/','') for p in positions}; tasks=[]
                 for i,s in enumerate(list(legacy.S.get('slots',[]))):
-                    if s and i not in occupied_slots and str(s).upper().replace('/','') not in occupied_symbols:
-                        tasks.append(legacy.open_pos(i,s))
+                    if s and i not in occupied_slots and str(s).upper().replace('/','') not in occupied_symbols: tasks.append(legacy.open_pos(i,s))
                 if tasks: await asyncio.gather(*tasks)
             await asyncio.sleep(1)
         except asyncio.CancelledError: raise
         except Exception as e:
-            legacy.S['error']=f'Engine: {type(e).__name__}: {e}'
-            print(f'[ENGINE] {type(e).__name__}: {e}',flush=True)
-            await asyncio.sleep(1)
+            legacy.S['error']=f'Engine: {type(e).__name__}: {e}'; print(f'[ENGINE] {type(e).__name__}: {e}',flush=True); await asyncio.sleep(1)
 legacy.engine=engine_repair_final
 
-# UI: TOP-10 in two columns, smaller Slots heading, and an explicit red/green
-# trading status directly inside Open Positions.
 html=legacy.HTML
-html=html.replace('Slots · TOP-6','Slots · TOP-10')
-html=html.replace('AUTO TOP-6','AUTO TOP-10')
-html=html.replace('Array.from({length:6','Array.from({length:10')
-html=html.replace('for(let i=0;i<6;i++)','for(let i=0;i<10;i++)')
-html=html.replace('Maximum 6 pairs','Maximum 10 pairs')
-html=html.replace('.grid6{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}', '.grid6{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}')
+html=html.replace('Slots · TOP-6','Slots · TOP-10').replace('AUTO TOP-6','AUTO TOP-10').replace('Array.from({length:6','Array.from({length:10').replace('for(let i=0;i<6;i++)','for(let i=0;i<10;i++)').replace('Maximum 6 pairs','Maximum 10 pairs')
+# Preserve the reference responsive grid: 3 columns on desktop, 2 on mobile.
+html=html.replace('.grid6{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}', '.grid6{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.grid6 .slot{display:block;width:100%;min-height:40px}')
 html=html.replace('.section-title{margin:0 0 12px;font-size:28px}', '.section-title{margin:0 0 12px;font-size:28px}.slots-title{font-size:26px!important}')
 html=html.replace('class="section-title">Slots', 'class="section-title slots-title">Slots')
 html=html.replace('<div class="card"><h2 class="section-title">Open Positions</h2><div id="pos" class="muted">No open positions</div></div>', '<div class="card"><h2 class="section-title">Open Positions</h2><div id="tradeStatus" class="trade-status">BOT ON · TRADING ACTIVE</div><div id="pos" class="muted">No open positions</div></div>')
 html=html.replace('.pos-line{display:grid;', '.trade-status{display:inline-block;font-size:11px;font-weight:900;padding:5px 9px;border-radius:8px;margin-bottom:8px;background:#078b53;color:#fff}.trade-status.off{background:#a72e3f}.pos-line{display:grid;')
-
-# Update the renderer without replacing the whole renderer body.
 needle="function render(){const m=state.mode||'PAPER';"
 insert="function render(){const m=state.mode||'PAPER';const ts=$('tradeStatus');if(ts){const on=!!state.running;ts.textContent=on?'BOT ON · TRADING ACTIVE':(state.positions&&state.positions.length?'BOT OFF · CLOSING POSITIONS':'BOT OFF · TRADING STOPPED');ts.className='trade-status'+(on?'':' off');}"
 html=html.replace(needle,insert,1)
-
 legacy.HTML=html
