@@ -1,138 +1,163 @@
 from . import fast_scalper_beta_001_legacy as legacy
-import asyncio, time
+from .market_radar import RADAR
+from fastapi import HTTPException
+from pydantic import BaseModel, Field
+import asyncio
+import time
 
-# Final surgical repair: UI layout only plus the existing independent trade engine.
-# Do not add Radar logic here.
-html = legacy.HTML
+# TOP-10 slots. The Radar pipeline remains based on the existing TOP-150 universe.
+legacy.MAX_SLOTS = 10
+legacy.S['slots'] = (list(legacy.S.get('slots', [])) + [None] * legacy.MAX_SLOTS)[:legacy.MAX_SLOTS]
 
-# Replace only the allocation/control card. Keep every existing function.
-alloc_pos = html.find('id="allocation"')
-start = html.rfind('<div class="card">', 0, alloc_pos)
-end = html.find('<div class="card">', alloc_pos + 1)
-if start < 0 or end < 0:
-    raise RuntimeError('Fast Scalper allocation card not found')
+# Rotation pool is TOP-20; the underlying TOP-150 -> 80 -> 40 -> 25 stages stay intact.
+import importlib
+_radar_mod = importlib.import_module('.market_radar', package=__package__)
+_radar_mod.FINAL = 20
+RADAR.top_n = 20
+_original_snapshot = RADAR.snapshot
+def snapshot_top20(limit=20):
+    return _original_snapshot(max(20, int(limit or 20)))
+RADAR.snapshot = snapshot_top20
 
-desired = '''<div class="card">
-<div class="row allocation-row"><input id="allocation" class="input amount" type="number" step="0.01" min="0" placeholder="Amount"><button type="button" class="btn test" id="allocBtn">SET BOT BALANCE</button><button type="button" class="btn stop" id="withdrawBtn">WITHDRAW</button></div>
-<div class="row profit-row" style="margin-top:8px"><input id="profit" class="input" type="number" step="0.01" value="0.41"><label style="padding:10px"><input id="reinvest" type="checkbox" checked> Reinvest</label></div>
-<div class="row control-row" style="margin-top:8px"><button type="button" class="btn on" id="onBtn">BOT ON · ACTIVE</button><button type="button" class="btn stop" id="emBtn">EMERGENCY</button><button type="button" class="btn" id="resetBtn">RESET</button></div>
-<div class="row control-row" style="margin-top:8px"><button type="button" class="btn stop" id="offBtn">BOT OFF</button><span class="muted" id="tim">SESSION 00:00 · 24H 00:00</span></div>
-</div>'''
-html = html[:start] + desired + html[end:]
+class Slots10(BaseModel):
+    slots:list[str] = Field(default_factory=list, max_length=10)
+    profit_pct:float = Field(0, ge=0, le=80)
+    reinvest:bool = False
 
-# Approved compact layout: Amount + SET BOT BALANCE + WITHDRAW on one line;
-# Profit + Reinvest below; trading controls remain below that.
-html = html.replace('.amount{flex:0 0 150px;max-width:150px}', '.amount{flex:1 1 0;min-width:0;max-width:none}')
-html = html.replace('.btn{border:0;border-radius:10px;padding:11px 15px;', '.btn{border:0;border-radius:10px;padding:10px 12px;')
-html = html.replace('.row{display:flex;gap:8px;flex-wrap:wrap}', '.row{display:flex;gap:8px;flex-wrap:wrap}.allocation-row{flex-wrap:nowrap;align-items:center}.allocation-row .amount{flex:1 1 0;min-width:0;max-width:none}.allocation-row .btn{font-size:11px;padding:10px 7px;white-space:nowrap}.profit-row{align-items:center}.control-row{align-items:center}.control-row .btn{font-size:12px}')
-html = html.replace('.grid6{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}', '.grid6{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.grid6 .slot{display:block;width:100%;min-height:40px}')
-html = html.replace('.line{font-size:12px;', '.line{font-size:12px;')
-html = html.replace('@media(max-width:650px){', '@media(max-width:650px){.allocation-row{flex-wrap:nowrap}.allocation-row .btn{font-size:10px;padding:10px 6px;white-space:nowrap}.allocation-row .amount{min-width:0}.control-row .btn{font-size:11px;padding:10px 9px}.control-row #tim{font-size:11px}.grid6{grid-template-columns:repeat(2,1fr)}')
+def remove_post(path):
+    for r in list(legacy.app.router.routes):
+        if getattr(r, 'path', None) == path and 'POST' in (getattr(r, 'methods', set()) or set()):
+            legacy.app.router.routes.remove(r)
 
-# Open Positions stays original but compact; no AGE label.
-html = html.replace('.pos-line{display:grid;', '.pos-line{font-size:12px;display:grid;')
-html = html.replace('.pos-main{white-space:nowrap;', '.pos-main{font-size:12px;white-space:nowrap;')
-html = html.replace('.pos-timer{font-weight:800;', '.pos-timer{font-size:12px;font-weight:800;')
+# Replace the old six-slot routes with ten-slot versions.
+remove_post('/api/slots')
+@legacy.app.post('/api/slots')
+async def slots10(b:Slots10):
+    a=[]
+    for x in b.slots:
+        z=str(x).upper().replace('/','').strip()
+        if z and z not in a:a.append(z)
+    if len(a)>10: raise HTTPException(400,'Maximum 10 pairs')
+    bad=[x for x in a if not x.endswith('USDT') or len(x)<=4]
+    if bad: raise HTTPException(400,'Invalid Binance pairs: '+','.join(bad))
+    new=a+[None]*(10-len(a)); old=list(legacy.S.get('slots',[]))
+    for i in range(10):
+        old_s=str(old[i] or '').upper().replace('/','') if i<len(old) else ''
+        if old_s and old_s!=str(new[i] or '').upper():
+            for p in list(legacy.S.get('positions',[])):
+                if p.get('slot')==i:
+                    try: await legacy.close(p,'MANUAL_REMOVE')
+                    except Exception as e: legacy.S['error']=f'Close {p.get("symbol")}: {type(e).__name__}: {e}'
+    legacy.S['slots']=new; legacy.S['profit']=b.profit_pct; legacy.S['reinvest']=b.reinvest
+    return await legacy.state()
 
-# The single Amount field is the withdrawal amount, as requested for the compact layout.
-withdraw_old = "async function withdrawClick(){try{const a=Number($('withdrawAmount').value);if(!Number.isFinite(a)||a<=0)throw Error('Enter withdrawal amount');state=await request('/api/withdraw','POST',{amount:a});$('msg').textContent='Withdrawn to Reserve: '+num(a)+' USDT';$('withdrawAmount').value='';render()}catch(e){$('msg').textContent=e.message}}"
-withdraw_new = "async function withdrawClick(){try{const a=Number($('allocation').value);if(!Number.isFinite(a)||a<=0)throw Error('Enter withdrawal amount');state=await request('/api/withdraw','POST',{amount:a});$('msg').textContent='Withdrawn to Reserve: '+num(a)+' USDT';$('allocation').value='';render()}catch(e){$('msg').textContent=e.message}}"
-html = html.replace(withdraw_old, withdraw_new)
+remove_post('/api/slots/auto-top6')
+@legacy.app.post('/api/slots/auto-top6')
+async def auto_top10(b:Slots10):
+    await legacy.radar(True)
+    ranked=[];seen=set()
+    for x in legacy.S.get('ranking',[]):
+        s=str(x.get('symbol','')).upper().replace('/','')
+        if s and s not in seen:ranked.append(s);seen.add(s)
+    target=ranked[:10];old=list(legacy.S.get('slots',[]))
+    for i in range(10):
+        old_s=str(old[i] or '').upper().replace('/','') if i<len(old) else ''
+        new_s=str(target[i] if i<len(target) else '').upper().replace('/','')
+        if old_s!=new_s:
+            for p in legacy.S.get('positions',[]):
+                if p.get('slot')==i:
+                    live=(float(p.get('current',0))/float(p.get('entry',1))-1)*100
+                    print(f'[ROTATION] KEEP {p.get("symbol")} old_slot={i} new_slot={new_s} live={live:.4f}%',flush=True)
+                    p['slot']=None
+    legacy.S['slots']=target+[None]*(10-len(target));legacy.S['profit']=b.profit_pct;legacy.S['reinvest']=b.reinvest
+    return await legacy.state()
 
-legacy.HTML = html
+# Loss guard: a MARKET SELL can fill below the PT snapshot. If the realized
+# result is negative, it is no longer treated as a normal PT and the symbol is
+# blocked before it can immediately re-enter.
+LOSS_COOLDOWN=60.0
+_previous_manage = legacy.manage
+async def manage_with_loss_guard():
+    before={str(x.get('id')) for x in legacy.S.get('closed',[])}
+    await _previous_manage()
+    from . import fast_scalper_antloss as anti
+    for item in list(legacy.S.get('closed',[])):
+        if str(item.get('id')) in before: continue
+        pnl=float(item.get('pnl') or 0.0)
+        reason=item.get('reason')
+        if pnl < -1e-9 and reason=='PROFIT_TARGET':
+            item['reason']='LOSS_AFTER_PT'
+            symbol=str(item.get('symbol','')).upper().replace('/','')
+            if symbol: anti._cooldowns[symbol]=time.time()+LOSS_COOLDOWN
+            print(f'[TRADE] LOSS_GUARD {symbol} realized_pnl={pnl:.6f} cooldown={LOSS_COOLDOWN:.0f}s',flush=True)
+legacy.manage=manage_with_loss_guard
 
-_open_lock = asyncio.Lock()
+# Session timer: BOT OFF stops new entries immediately. Existing positions may
+# finish under the existing grace period. The session clock freezes only after
+# the final position is closed, exactly as requested.
+def freeze_session_if_stopped():
+    if legacy.S.get('stop_requested') and not legacy.S.get('positions'):
+        started=legacy.S.get('session_started')
+        if started:
+            try:
+                legacy.S['session_elapsed']=max(0.0,time.time()-legacy.datetime.fromisoformat(started).timestamp())
+            except Exception: pass
+        legacy.S['session_started']=None
+        legacy.S['stop_requested']=None
 
-async def open_pos_fast(i, s):
-    if not s:
-        return
-    symbol = str(s).upper().replace('/', '')
-    if any(str(p.get('symbol','')).upper().replace('/', '') == symbol for p in legacy.S.get('positions', [])):
-        return
-    async with _open_lock:
-        n = sum(1 for x in legacy.S.get('slots', []) if x)
-        if not n or legacy.S.get('free', 0) <= 0:
-            return
-        stake = min(float(legacy.S['free']), float(legacy.S['bot']) / n)
-        if stake <= 0:
-            return
-        legacy.S['free'] -= stake
-    try:
-        if legacy.S.get('mode') == 'BINANCE_TEST':
-            r = await legacy.B.market_buy(symbol, stake)
-            status = r.get('status', '')
-            if status != 'FILLED':
-                raise RuntimeError(f'Binance BUY not filled: {status or r}')
-            qty = float(r.get('executedQty') or 0)
-            spent = float(r.get('cummulativeQuoteQty') or 0)
-            if qty <= 0 or spent <= 0:
-                raise RuntimeError(f'Binance BUY returned empty fill: {r}')
-            ep = spent / qty
-            async with _open_lock:
-                legacy.S['free'] += max(0.0, stake - spent)
-            p = {'id': f"B{r.get('orderId', int(time.time()*1000))}", 'slot': i, 'symbol': symbol, 'tf': legacy.TF, 'entry': ep, 'current': ep, 'stake': spent, 'qty': qty, 'opened': time.time(), 'opened_at': legacy.now(), 'order_id': r.get('orderId')}
-            legacy.S['positions'].append(p)
-            legacy.S['orders'].insert(0, {'time': legacy.now(), 'symbol': symbol, 'side':'BUY', 'status':status, 'price':ep, 'qty':qty, 'stake':spent, 'order_id':r.get('orderId'), 'slot':i})
-            print(f'[TRADE] OPEN {symbol} slot={i} stake={spent:.6f} entry={ep} opened_at={p["opened_at"]} mode=BINANCE_TEST', flush=True)
-        else:
-            ep = legacy.price(symbol)
-            if ep <= 0:
-                raise RuntimeError('price unavailable')
-            p = {'id': f'P{int(time.time()*1000)}', 'slot': i, 'symbol': symbol, 'tf': legacy.TF, 'entry': ep, 'current': ep, 'stake': stake, 'opened': time.time(), 'opened_at': legacy.now()}
-            legacy.S['positions'].append(p)
-            legacy.S['orders'].insert(0, {'time': legacy.now(), 'symbol':symbol, 'side':'BUY', 'status':'PAPER_FILLED', 'price':ep, 'slot':i})
-            print(f'[TRADE] OPEN {symbol} slot={i} stake={stake:.6f} entry={ep} opened_at={p["opened_at"]} mode=PAPER', flush=True)
-    except Exception as e:
-        async with _open_lock:
-            legacy.S['free'] += stake
-        legacy.S['error'] = f'Binance BUY {symbol}: {type(e).__name__}: {e}' if legacy.S.get('mode') == 'BINANCE_TEST' else f'Open {symbol}: {type(e).__name__}: {e}'
-        print(f'[TRADE] BUY_ERROR {symbol} slot={i} {type(e).__name__}: {e}', flush=True)
+remove_post('/api/paper/stop')
+@legacy.app.post('/api/paper/stop')
+async def stop_final():
+    legacy.S['running']=False
+    legacy.S['stop_requested']=time.time() if legacy.S.get('positions') else None
+    freeze_session_if_stopped()
+    print(f'[BOT] OFF requested positions={len(legacy.S.get("positions",[]))}',flush=True)
+    return await legacy.state()
 
-async def engine_repair():
+# Keep the current repaired engine, but make it call the loss-guarded manager
+# and freeze the session as soon as the last position disappears.
+async def engine_repair_final():
     from . import fast_scalper_antloss as anti
     asyncio.create_task(anti._radar_loop())
     while True:
         try:
             if legacy.S.get('running') or legacy.S.get('stop_requested'):
                 await legacy.manage()
+                freeze_session_if_stopped()
             if legacy.S.get('running'):
-                positions = legacy.S.get('positions', [])
-                occupied_slots = {p.get('slot') for p in positions}
-                occupied_symbols = {str(p.get('symbol','')).upper().replace('/','') for p in positions}
-                tasks = []
-                for i, s in enumerate(list(legacy.S.get('slots', []))):
+                positions=legacy.S.get('positions',[])
+                occupied_slots={p.get('slot') for p in positions}
+                occupied_symbols={str(p.get('symbol','')).upper().replace('/','') for p in positions}
+                tasks=[]
+                for i,s in enumerate(list(legacy.S.get('slots',[]))):
                     if s and i not in occupied_slots and str(s).upper().replace('/','') not in occupied_symbols:
-                        tasks.append(open_pos_fast(i, s))
-                if tasks:
-                    await asyncio.gather(*tasks)
+                        tasks.append(legacy.open_pos(i,s))
+                if tasks: await asyncio.gather(*tasks)
             await asyncio.sleep(1)
-        except asyncio.CancelledError:
-            raise
+        except asyncio.CancelledError: raise
         except Exception as e:
-            legacy.S['error'] = f'Engine: {type(e).__name__}: {e}'
-            print(f'[ENGINE] {type(e).__name__}: {e}', flush=True)
+            legacy.S['error']=f'Engine: {type(e).__name__}: {e}'
+            print(f'[ENGINE] {type(e).__name__}: {e}',flush=True)
             await asyncio.sleep(1)
+legacy.engine=engine_repair_final
 
-legacy.open_pos = open_pos_fast
-legacy.engine = engine_repair
+# UI: TOP-10 in two columns, smaller Slots heading, and an explicit red/green
+# trading status directly inside Open Positions.
+html=legacy.HTML
+html=html.replace('Slots · TOP-6','Slots · TOP-10')
+html=html.replace('AUTO TOP-6','AUTO TOP-10')
+html=html.replace('Array.from({length:6','Array.from({length:10')
+html=html.replace('for(let i=0;i<6;i++)','for(let i=0;i<10;i++)')
+html=html.replace('Maximum 6 pairs','Maximum 10 pairs')
+html=html.replace('.grid6{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}', '.grid6{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}')
+html=html.replace('.section-title{margin:0 0 12px;font-size:28px}', '.section-title{margin:0 0 12px;font-size:28px}.slots-title{font-size:26px!important}')
+html=html.replace('class="section-title">Slots', 'class="section-title slots-title">Slots')
+html=html.replace('<div class="card"><h2 class="section-title">Open Positions</h2><div id="pos" class="muted">No open positions</div></div>', '<div class="card"><h2 class="section-title">Open Positions</h2><div id="tradeStatus" class="trade-status">BOT ON · TRADING ACTIVE</div><div id="pos" class="muted">No open positions</div></div>')
+html=html.replace('.pos-line{display:grid;', '.trade-status{display:inline-block;font-size:11px;font-weight:900;padding:5px 9px;border-radius:8px;margin-bottom:8px;background:#078b53;color:#fff}.trade-status.off{background:#a72e3f}.pos-line{display:grid;')
 
-# Emergency must stop the entry engine BEFORE any position is closed.
-# The previous endpoint set running=False only after the close loop. While
-# Binance SELL requests were in flight, the engine saw free slots and opened
-# replacement positions. That is the exact race seen in the Render logs.
-for _r in list(legacy.app.router.routes):
-    if getattr(_r, 'path', None) == '/api/paper/emergency' and 'POST' in (getattr(_r, 'methods', set()) or set()):
-        legacy.app.router.routes.remove(_r)
+# Update the renderer without replacing the whole renderer body.
+needle="function render(){const m=state.mode||'PAPER';"
+insert="function render(){const m=state.mode||'PAPER';const ts=$('tradeStatus');if(ts){const on=!!state.running;ts.textContent=on?'BOT ON · TRADING ACTIVE':(state.positions&&state.positions.length?'BOT OFF · CLOSING POSITIONS':'BOT OFF · TRADING STOPPED');ts.className='trade-status'+(on?'':' off');}"
+html=html.replace(needle,insert,1)
 
-@legacy.app.post('/api/paper/emergency')
-async def emergency_fixed():
-    legacy.S['running'] = False
-    legacy.S['stop_requested'] = None
-    print(f'[BOT] EMERGENCY requested positions={len(legacy.S.get("positions", []))}', flush=True)
-    for p in list(legacy.S.get('positions', [])):
-        try:
-            await legacy.close(p, 'EMERGENCY_STOP')
-        except Exception as e:
-            legacy.S['error'] = f'Close {p.get("symbol")}: {type(e).__name__}: {e}'
-    legacy.S['session_started'] = None
-    return await legacy.state()
+legacy.HTML=html
