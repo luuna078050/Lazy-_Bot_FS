@@ -58,7 +58,8 @@ async def stop_final_position_patch():
     legacy.S['stop_requested'] = time.time() if legacy.S.get('positions') else None
     return await legacy.state()
 
-# Selective emergency close for one open position.
+# Selective close for one open position. This closes the order only;
+# the pair remains in its slot and may be selected again by the engine.
 @legacy.app.post('/api/position/emergency')
 async def position_emergency(body: dict):
     ident = str(body.get('id') or '').strip()
@@ -120,7 +121,7 @@ new_render = r'''function render(){
  $('pos').innerHTML=p.length?p.map(x=>{
    const d=Number(x.delta_usdt!==undefined?x.delta_usdt:((Number(x.current||0)/Number(x.entry||1)-1)*Number(x.stake||0)));
    const age=Number(x.age_seconds!==undefined?x.age_seconds:Math.max(0,Date.now()/1000-Number(x.opened||Date.now()/1000)));
-   return `<div class="pos-line"><span class="pos-main">${x.symbol} · ${num(x.stake)} USDT</span><span class="pos-delta ${d>=0?'pos-plus':'pos-minus'}">${d>=0?'+':''}${num(d)} USDT</span><span class="pos-age">${clock(age)}</span><button type="button" class="btn pos-emergency" data-pos-emergency="${x.id||''}" data-symbol="${x.symbol}">EMERGENCY</button></div>`
+   return `<div class="pos-line"><span class="pos-main">${x.symbol} · ${num(x.stake)} USDT</span><span class="pos-delta ${d>=0?'pos-plus':'pos-minus'}">${d>=0?'+':''}${num(d)} USDT</span><span class="pos-age">${clock(age)}</span><button type="button" class="btn pos-emergency" data-pos-emergency="${x.id||''}" data-symbol="${x.symbol}">CLOSE</button></div>`
  }).join(''):'No open positions';
  const c=(state.closed||[]).slice(0,5);
  $('closed').innerHTML=c.map(x=>{
@@ -153,3 +154,60 @@ async def state_enriched():
         p['age']=p['age_seconds']
     return out
 legacy.state = state_enriched
+
+# FINAL ROTATION FIX:
+# A rotation changes the pair assigned to a slot. The previous implementation
+# marked the old position as KEEP/slot=None, leaving the order open while the
+# slot became available. That allowed every rotation to create another order.
+# Correct lifecycle: close old order -> only on successful close assign new pair.
+for r in list(legacy.app.router.routes):
+    if getattr(r, 'path', None) in ('/api/slots/auto-top6', '/api/slots/auto-top10') and 'POST' in (getattr(r, 'methods', set()) or set()):
+        legacy.app.router.routes.remove(r)
+
+@legacy.app.post('/api/slots/auto-top6')
+async def auto_top10_rotation_fixed(b: object):
+    await legacy.radar(True)
+    ranked=[]; seen=set()
+    for x in legacy.S.get('ranking', []):
+        s=str(x.get('symbol','')).upper().replace('/','')
+        if s and s not in seen:
+            ranked.append(s); seen.add(s)
+    target=ranked[:10]
+    old=list(legacy.S.get('slots', []))
+    if len(old) < 10:
+        old += [None] * (10-len(old))
+    old = old[:10]
+    final_slots=list(old)
+    for i in range(10):
+        old_s=str(old[i] or '').upper().replace('/','')
+        new_s=str(target[i] if i < len(target) else '').upper().replace('/','')
+        if old_s == new_s:
+            continue
+        to_close=[]
+        for p in list(legacy.S.get('positions', [])):
+            ps=str(p.get('symbol','')).upper().replace('/','')
+            pslot=p.get('slot')
+            # Normal case: position belongs to this slot. Fallback handles
+            # orphaned positions left by the old buggy rotation implementation.
+            if pslot == i or (pslot is None and old_s and ps == old_s):
+                to_close.append(p)
+        close_ok=True
+        for p in to_close:
+            print(f'[ROTATION] CLOSE {p.get("symbol")} old_slot={i} new_slot={new_s}', flush=True)
+            if not await close_safe(p, 'ROTATION'):
+                close_ok=False
+                print(f'[ROTATION] CLOSE_FAILED {p.get("symbol")} old_slot={i} new_slot={new_s}', flush=True)
+                break
+        if close_ok:
+            final_slots[i] = target[i] if i < len(target) else None
+            print(f'[ROTATION] ASSIGN slot={i} {old_s or "EMPTY"} -> {new_s or "EMPTY"}', flush=True)
+        else:
+            # Never free a slot if its previous order failed to close.
+            final_slots[i] = old[i]
+    legacy.S['slots']=final_slots
+    try:
+        legacy.S['profit']=float(getattr(b, 'profit_pct', legacy.S.get('profit', 0.30)))
+        legacy.S['reinvest']=bool(getattr(b, 'reinvest', legacy.S.get('reinvest', False)))
+    except Exception:
+        pass
+    return await legacy.state()
