@@ -11,7 +11,7 @@ TOP150=150; STAGE1=80; STAGE2=40; STAGE3=25; FINAL=15
 
 class MarketRadar:
  def __init__(self,top_n:int=FINAL):
-  self.top_n=top_n; self.lock=threading.RLock(); self.tickers={}; self.bars=defaultdict(lambda:deque(maxlen=20)); self.pulses=defaultdict(lambda:deque(maxlen=90)); self._ws=None; self._stop=threading.Event(); self._thread=None; self._ready=threading.Event(); self.connected=False; self.last_error=None; self.last_update=0.0; self.message_count=0; self.stage_counts={"universe":0,"top150":0,"stage1":0,"stage2":0,"stage3":0,"top15":0}; self.last_snapshot=0.0
+  self.top_n=top_n; self.lock=threading.RLock(); self.tickers={}; self.bars=defaultdict(lambda:deque(maxlen=20)); self.pulses=defaultdict(lambda:deque(maxlen=90)); self._ws=None; self._stop=threading.Event(); self._thread=None; self._ready=threading.Event(); self.connected=False; self.last_error=None; self.last_update=0.0; self.message_count=0; self.stage_counts={"universe":0,"top150":0,"stage1":0,"stage2":0,"stage3":0,"top15":0}; self.last_snapshot=0.0; self._stream_symbols=()
  def start(self):
   if self._thread and self._thread.is_alive(): return
   self._stop.clear(); self._thread=threading.Thread(target=self._run,daemon=True,name="fast-scalper-market-radar"); self._thread.start()
@@ -21,7 +21,7 @@ class MarketRadar:
    try:self._ws.close()
    except Exception:pass
  def status(self):
-  with self.lock:return {"connected":self.connected,"ready":self._ready.is_set(),"ticker_count":len(self.tickers),"last_update":self.last_update,"seconds_since_update":round(time.time()-self.last_update,1) if self.last_update else None,"message_count":self.message_count,"last_error":self.last_error,"data_source":"Binance public WebSocket","rest_polling":False,"stage_counts":dict(self.stage_counts)}
+  with self.lock:return {"connected":self.connected,"ready":self._ready.is_set(),"ticker_count":len(self.tickers),"last_update":self.last_update,"seconds_since_update":round(time.time()-self.last_update,1) if self.last_update else None,"message_count":self.message_count,"last_error":self.last_error,"data_source":"Binance public WebSocket","rest_polling":False,"stage_counts":dict(self.stage_counts),"stream_symbols":len(self._stream_symbols)}
  def _build_url(self,symbols=None):
   streams=["!miniTicker@arr"]
   if symbols:
@@ -33,13 +33,28 @@ class MarketRadar:
  def _run(self):
   while not self._stop.is_set():
    try:
-    symbols=self._top_symbols(); url=self._build_url(symbols if len(symbols)>=50 else None)
+    self._stream_symbols=()
+    url=self._build_url()
     self._ws=websocket.WebSocketApp(url,on_open=self._on_open,on_message=self._on_message,on_error=self._on_error,on_close=self._on_close)
     self._ws.run_forever(ping_interval=15,ping_timeout=10)
    except Exception as exc:
     self.connected=False; self.last_error=f"{type(exc).__name__}: {exc}"[:300]
    if not self._stop.is_set():time.sleep(1.0)
- def _on_open(self,_ws):self.connected=True;self.last_error=None;print("RADAR_WS_CONNECTED",flush=True)
+ def _on_open(self,_ws):
+  self.connected=True;self.last_error=None;print("RADAR_WS_CONNECTED",flush=True)
+  threading.Thread(target=self._promote_streams,daemon=True,name="radar-stream-promoter").start()
+ def _promote_streams(self):
+  deadline=time.time()+8
+  while not self._stop.is_set() and time.time()<deadline:
+   symbols=self._top_symbols()
+   if len(symbols)>=50:
+    with self.lock:self._stream_symbols=tuple(symbols)
+    print(f"RADAR_TOP150_READY {len(symbols)}",flush=True)
+    try:
+     if self._ws:self._ws.close()
+    except Exception:pass
+    return
+   time.sleep(.25)
  def _on_close(self,_ws,code=None,msg=None):
   self.connected=False
   if code:self.last_error=f"WebSocket closed: {code} {msg or ''}".strip()
