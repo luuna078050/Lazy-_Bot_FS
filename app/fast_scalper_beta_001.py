@@ -7,8 +7,6 @@ S = legacy.S
 B = legacy.B
 START = legacy.START
 
-# Keep one explicit mode endpoint. Mode selection itself never calls Binance;
-# Binance connectivity/account checks happen only when starting BINANCE_TEST.
 app.router.routes = [
     r for r in app.router.routes
     if not (getattr(r, 'path', None) == '/api/mode' and 'POST' in (getattr(r, 'methods', set()) or set()))
@@ -105,3 +103,4 @@ $('paperBtn').addEventListener('click',()=>setMode('PAPER'));$('testModeBtn').ad
 
 from . import fast_scalper_patch
 from . import fast_scalper_live_repair
+from . import fast_scalper_final_patch
