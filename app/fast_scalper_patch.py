@@ -43,10 +43,11 @@ async def close_with_timestamp(p,reason):
     return result
 legacy.close=close_with_timestamp
 
-# Real graceful BOT OFF: stop new entries immediately, then close remaining
-# positions after one minute as BOT_OFF. This is separate from normal TIMEOUT.
-for r in list(legacy.app.router.routes):
-    if getattr(r,'path',None)=='/api/paper/stop' and 'POST' in (getattr(r,'methods',set()) or set()): legacy.app.router.routes.remove(r)
+def remove_post(path):
+    for r in list(legacy.app.router.routes):
+        if getattr(r,'path',None)==path and 'POST' in (getattr(r,'methods',set()) or set()): legacy.app.router.routes.remove(r)
+
+remove_post('/api/paper/stop')
 @legacy.app.post('/api/paper/stop')
 async def stop_fixed():
     legacy.S['running']=False; legacy.S['stop_requested']=time.time() if legacy.S.get('positions') else None
@@ -57,8 +58,7 @@ _original_start=legacy.start
 async def start_clean(b):
     if legacy.S.get('positions'): raise HTTPException(400,'Close current positions before a new session')
     legacy.S['stop_requested']=None; result=await _original_start(b); legacy.S['closed']=[]; legacy.S['orders']=[]; return await legacy.state()
-for r in list(legacy.app.router.routes):
-    if getattr(r,'path',None)=='/api/paper/start' and 'POST' in (getattr(r,'methods',set()) or set()): legacy.app.router.routes.remove(r)
+remove_post('/api/paper/start')
 @legacy.app.post('/api/paper/start')
 async def start_endpoint(b:legacy.Start): return await start_clean(b)
 
@@ -68,14 +68,13 @@ async def reset_fixed():
     if s.get('mode')=='PAPER': s['account']=legacy.START; s['reserve']=legacy.START
     else: s['reserve']=max(0.0,float(s.get('account',0.0) or 0.0))
     return await legacy.state()
-for r in list(legacy.app.router.routes):
-    if getattr(r,'path',None)=='/api/reset' and 'POST' in (getattr(r,'methods',set()) or set()): legacy.app.router.routes.remove(r)
+remove_post('/api/reset')
 @legacy.app.post('/api/reset')
 async def reset_endpoint(): return await reset_fixed()
 
-# AUTO TOP-6 keeps symbols unique and reconciles changed slots with live positions.
-for r in list(legacy.app.router.routes):
-    if getattr(r,'path',None)=='/api/slots/auto-top6' and 'POST' in (getattr(r,'methods',set()) or set()): legacy.app.router.routes.remove(r)
+# AUTO TOP-6 never closes a live position just because its slot changed.
+# A recovery position is detached from the slot so the new ranking can rotate in.
+remove_post('/api/slots/auto-top6')
 @legacy.app.post('/api/slots/auto-top6')
 async def auto_top6_fixed(b:legacy.Slots):
     await legacy.radar(True); ranked=[]; seen=set()
@@ -86,14 +85,14 @@ async def auto_top6_fixed(b:legacy.Slots):
     for i in range(legacy.MAX_SLOTS):
         old_s=str(old[i] or '').upper().replace('/',''); new_s=str(target[i] if i<len(target) else '').upper().replace('/','')
         if old_s!=new_s:
-            for p in list(legacy.S.get('positions',[])):
+            for p in legacy.S.get('positions',[]):
                 if p.get('slot')==i:
-                    try: await legacy.close(p,'ROTATION')
-                    except Exception as e: legacy.S['error']=f'Rotation close {p.get("symbol")}: {type(e).__name__}: {e}'
+                    live=(float(p.get('current',0))/float(p.get('entry',1))-1)*100
+                    print(f'[ROTATION] KEEP {p.get("symbol")} old_slot={i} new_slot={new_s} live={live:.4f}%',flush=True)
+                    p['slot']=None
     legacy.S['slots']=target+[None]*(legacy.MAX_SLOTS-len(target)); legacy.S['profit']=b.profit_pct; legacy.S['reinvest']=b.reinvest
     return await legacy.state()
 
-# Keep entry rules unchanged, but expose the exact reason a selected slot is skipped.
 _original_open_pos=legacy.open_pos
 async def open_pos_diagnostic(i,s):
     if not s:return
@@ -127,9 +126,11 @@ async def engine_fixed():
         except Exception as e: legacy.S['error']=f'Engine: {type(e).__name__}: {e}'; await asyncio.sleep(1)
 anti.manage=manage_safe; legacy.manage=manage_safe; legacy.engine=engine_fixed
 
-# Compact trade UI. Open: BOT · pair · quantity · stake · Δ · timer.
+# UI: separate allocation and withdrawal fields; open positions ordered by slot; no BOT/IN/OUT.
 html=legacy.HTML
-html=html.replace('.line{font-size:12px;','.pos-line{display:flex;align-items:center;gap:6px;font-size:12px;padding:5px 0;border-bottom:1px solid #24314a}.pos-main{min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pos-timer{flex:0 0 auto;font-weight:800}.profit-pos{color:#16c784;font-weight:700}.profit-neg{color:#ff4d5f;font-weight:700}.line{font-size:12px;')
-html=html.replace("$('pos').innerHTML=p.length?p.map(x=>`<div class=\"line\">${x.symbol} · ${num(x.stake)} USDT · ${num(x.current)}</div>`).join(''):'No open positions';", "$('pos').innerHTML=p.length?p.map(x=>{const d=(Number(x.current||0)/Number(x.entry||x.current||1)-1)*100;const age=Math.max(0,Math.floor(Date.now()/1000-Number(x.opened||Date.now()/1000)));const qty=x.qty!=null?Number(x.qty).toFixed(4):'—';return `<div class=\"pos-line\"><span class=\"pos-main\">BOT · ${x.symbol} · ${qty} · ${num(x.stake)} USDT · Δ ${d>=0?'+':''}${d.toFixed(3)}%</span><span class=\"pos-timer\">${clock(age)}</span></div>`}).join(''):'No open positions';")
-html=html.replace("$('closed').innerHTML=(state.closed||[]).slice(0,5).map(x=>`<div class=\"line\">${x.symbol} · ${x.reason} · ${num(x.pnl)} USDT · ${num(x.exit)}</div>`).join('')||'No closed trades';", "$('closed').innerHTML=(state.closed||[]).slice(0,5).map(x=>{const pnl=Number(x.pnl||0);const r=({TIMEOUT:'T.OUT',PROFIT_TARGET:'P.T',ROTATION:'ROT',EMERGENCY_STOP:'E.STOP',BOT_OFF:'B.OFF'})[x.reason]||x.reason;const ts=Number(x.closed_at||0);const t=ts?new Date(ts*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}):'--:--:--';return `<div class=\"line ${pnl>=0?'profit-pos':'profit-neg'}\">${x.symbol} · ${r} · ${pnl>=0?'+':''}${pnl.toFixed(4)} · ${num(x.stake)} · ${num(x.entry)}→${num(x.exit)} · ${t}</div>`}).join('')||'No closed trades';")
+html=html.replace('.row{display:flex;gap:8px;flex-wrap:wrap}', '.row{display:flex;gap:8px;flex-wrap:wrap}.allocation-row{display:grid;grid-template-columns:minmax(100px,150px) auto;gap:8px;align-items:center}.money-row{display:grid;grid-template-columns:minmax(100px,150px) auto;gap:8px;align-items:center;margin-top:8px}.profit-row{margin-top:8px;align-items:center}.field-label{font-size:10px;color:#8b97ae;margin-bottom:3px}')
+html=html.replace('<div class="card"><div class="row"><input id="allocation" class="input amount" type="number" step="0.01" min="0" placeholder="Amount"><button type="button" class="btn test" id="allocBtn">SET BOT BALANCE</button><button type="button" class="btn stop" id="withdrawBtn">WITHDRAW</button><input id="profit" class="input" type="number" step="0.01" value="0.41"><label style="padding:10px"><input id="reinvest" type="checkbox" checked> Reinvest</label></div>', '<div class="card"><div class="allocation-row"><div><div class="field-label">BOT BALANCE</div><input id="allocation" class="input amount" type="number" step="0.01" min="0" placeholder="150"></div><button type="button" class="btn test" id="allocBtn">SET BOT BALANCE</button></div><div class="money-row"><div><div class="field-label">WITHDRAW AMOUNT</div><input id="withdrawAmount" class="input amount" type="number" step="0.01" min="0" placeholder="0.00"></div><button type="button" class="btn stop" id="withdrawBtn">WITHDRAW</button></div><div class="row profit-row"><div><div class="field-label">PROFIT %</div><input id="profit" class="input" type="number" step="0.01" value="0.41"></div><label style="padding:10px"><input id="reinvest" type="checkbox" checked> Reinvest</label></div>')
+html=html.replace("async function withdrawClick(){try{const a=Number($('allocation').value);if(!Number.isFinite(a)||a<=0)throw Error('Enter withdrawal amount');state=await request('/api/withdraw','POST',{amount:a});$('msg').textContent='Withdrawn to Reserve: '+num(a)+' USDT';$('allocation').value='';render()}catch(e){$('msg').textContent=e.message}}", "async function withdrawClick(){try{const a=Number($('withdrawAmount').value);if(!Number.isFinite(a)||a<=0)throw Error('Enter withdrawal amount');state=await request('/api/withdraw','POST',{amount:a});$('msg').textContent='Withdrawn to Reserve: '+num(a)+' USDT';$('withdrawAmount').value='';render()}catch(e){$('msg').textContent=e.message}}")
+html=html.replace("const p=state.positions||[];$('pos').innerHTML=p.length?p.map(x=>{const d=(Number(x.current||0)/Number(x.entry||x.current||1)-1)*100;const age=Math.max(0,Math.floor(Date.now()/1000-Number(x.opened||Date.now()/1000)));const qty=x.qty!=null?Number(x.qty).toFixed(4):'—';return `<div class=\"pos-line\"><span class=\"pos-main\">BOT · ${x.symbol} · ${qty} · ${num(x.stake)} USDT · Δ ${d>=0?'+':''}${d.toFixed(3)}%</span><span class=\"pos-timer\">${clock(age)}</span></div>`}).join(''):'No open positions';", "const p=(state.positions||[]).slice().sort((a,b)=>(Number(a.slot??999)-Number(b.slot??999)));$('pos').innerHTML=p.length?p.map(x=>{const d=(Number(x.current||0)/Number(x.entry||x.current||1)-1)*100;const age=Math.max(0,Math.floor(Date.now()/1000-Number(x.opened||Date.now()/1000)));const qty=x.qty!=null?Number(x.qty).toFixed(4):'—';return `<div class=\"pos-line\"><span class=\"pos-main\">${x.symbol} · ${qty} · ${num(x.stake)} USDT · Δ ${d>=0?'+':''}${d.toFixed(3)}%</span><span class=\"pos-timer\">${clock(age)}</span></div>`}).join(''):'No open positions';")
+html=html.replace("const t=ts?new Date(ts*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}):'--:--:--';return `<div class=\"line ${pnl>=0?'profit-pos':'profit-neg'}\">${x.symbol} · ${r} · ${pnl>=0?'+':''}${pnl.toFixed(4)} · ${num(x.stake)} · ${num(x.entry)}→${num(x.exit)} · ${t}</div>", "const t=ts?new Date(ts*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):'--:--';return `<div class=\"line ${pnl>=0?'profit-pos':'profit-neg'}\">${x.symbol} · ${r} · ${pnl>=0?'+':''}${pnl.toFixed(4)} · ${Number(x.stake||0).toFixed(2)} USDT · ${num(x.entry)}→${num(x.exit)} · ${t}</div>")
 legacy.HTML=html
