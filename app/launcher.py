@@ -5,9 +5,6 @@ import uvicorn
 
 from . import fast_scalper_beta_001_legacy as legacy
 
-# Binance's official Spot Testnet docs publish a primary REST endpoint plus
-# api1.testnet.binance.vision as an alternate. Keep the existing service and
-# fail over only on transient gateway errors.
 TESTNET_BASES = [
     "https://testnet.binance.vision/api",
     "https://api1.testnet.binance.vision/api",
@@ -83,5 +80,10 @@ legacy.Binance.ping = resilient_ping
 legacy.Binance.account = resilient_account
 legacy.Binance.order = resilient_order
 
+# Import the full application first so its existing overlays remain intact,
+# then load the final surgical repair layer on top of them.
+from . import fast_scalper_beta_001 as app_module
+from . import final_surgical_repair
+
 if __name__ == "__main__":
-    uvicorn.run("app.fast_scalper_beta_001:app", host="0.0.0.0", port=int(__import__("os").environ["PORT"]))
+    uvicorn.run(app_module.app, host="0.0.0.0", port=int(__import__("os").environ["PORT"]))
