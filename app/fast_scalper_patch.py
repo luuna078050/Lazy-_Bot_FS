@@ -157,3 +157,5 @@ if old_load not in html:
 html=html.replace(old_load,new_load,1)
 
 legacy.HTML=html
+
+from . import fast_scalper_live_repair
