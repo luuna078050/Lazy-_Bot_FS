@@ -3,8 +3,8 @@
 Radar universe: 100 liquid USDT spot pairs. Selection is driven primarily by
 short-term price movement (30s/1m/2m/4m), controlled volatility and repeatable
 scalp activity. 24h statistics are used only for liquidity/context, not as the
-main directional signal. Pump/reversal behaviour is penalized and exposed as
-an explicit risk warning.
+main directional signal. Pump/reversal behaviour is penalized and exposed as an
+explicit risk warning.
 """
 from __future__ import annotations
 
@@ -24,19 +24,7 @@ HISTORY_SECONDS=300
 
 class MarketRadar:
     def __init__(self,top_n:int=15):
-        self.top_n=top_n
-        self.lock=threading.RLock()
-        self.tickers:dict[str,dict[str,Any]]={}
-        self.history:dict[str,deque[tuple[float,float]]]={}
-        self.symbols:tuple[str,...]=()
-        self.last_error=None
-        self.last_update=0.0
-        self.connected=False
-        self.url=""
-        self._ws=None
-        self._stop=threading.Event()
-        self._thread=None
-        self._universe_loaded_at=0.0
+        self.top_n=top_n; self.lock=threading.RLock(); self.tickers:dict[str,dict[str,Any]]={}; self.history:dict[str,deque[tuple[float,float]]]={}; self.symbols:tuple[str,...]=(); self.last_error=None; self.last_update=0.0; self.connected=False; self.url=""; self._ws=None; self._stop=threading.Event(); self._thread=None; self._universe_loaded_at=0.0
 
     def _refresh_universe(self,force=False):
         now=time.time()
@@ -48,23 +36,18 @@ class MarketRadar:
                 try:q=float(d.get("q",0) or 0)
                 except (TypeError,ValueError):q=0.0
                 if q>0:candidates.append((q,s.lower()))
-            candidates.sort(reverse=True)
-            symbols=tuple(s for _,s in candidates[:UNIVERSE_SIZE])
+            candidates.sort(reverse=True); symbols=tuple(s for _,s in candidates[:UNIVERSE_SIZE])
             if symbols:
                 self.symbols=symbols
                 for s in symbols:self.history.setdefault(s.upper(),deque(maxlen=360))
-                self._universe_loaded_at=now
-                print(f"[RADAR] universe refreshed: {len(symbols)} USDT pairs",flush=True)
+                self._universe_loaded_at=now; print(f"[RADAR] universe refreshed: {len(symbols)} USDT pairs",flush=True)
 
     def start(self):
         if self._thread and self._thread.is_alive():return
-        self._stop.clear()
-        self._thread=threading.Thread(target=self._run,daemon=True,name="fast-scalper-market-radar")
-        self._thread.start()
+        self._stop.clear(); self._thread=threading.Thread(target=self._run,daemon=True,name="fast-scalper-market-radar"); self._thread.start()
 
     def stop(self):
-        self._stop.set();self.connected=False
-        ws=self._ws
+        self._stop.set();self.connected=False; ws=self._ws
         if ws:
             try:ws.close()
             except Exception:pass
@@ -77,8 +60,7 @@ class MarketRadar:
                 if self._stop.is_set():break
                 try:
                     self.url=url;self.last_error=None
-                    ws=websocket.WebSocketApp(url,on_open=self._on_open,on_message=self._on_message,on_error=self._on_error,on_close=self._on_close)
-                    self._ws=ws
+                    ws=websocket.WebSocketApp(url,on_open=self._on_open,on_message=self._on_message,on_error=self._on_error,on_close=self._on_close); self._ws=ws
                     ws.run_forever(ping_interval=20,ping_timeout=10,ping_payload="fs",suppress_origin=True,http_proxy_host=None,http_proxy_port=None)
                     if self.last_update>0:got_data=True;break
                 except Exception as exc:
@@ -87,14 +69,10 @@ class MarketRadar:
             if not self._stop.is_set():time.sleep(1 if got_data else 2)
 
     def _on_open(self,ws):
-        self.connected=True;self.last_error=None
-        print(f"[RADAR] connected {self.url}; mini-ticker all-market stream",flush=True)
-
+        self.connected=True;self.last_error=None;print(f"[RADAR] connected {self.url}; mini-ticker all-market stream",flush=True)
     def _on_close(self,_ws,code,msg):
         self.connected=False
-        if code or msg:
-            self.last_error=f"closed {code}: {msg}"[:240];print(f"[RADAR] {self.last_error}",flush=True)
-
+        if code or msg:self.last_error=f"closed {code}: {msg}"[:240];print(f"[RADAR] {self.last_error}",flush=True)
     def _on_error(self,_ws,error):
         self.connected=False;self.last_error=str(error)[:240];print(f"[RADAR] websocket error: {self.last_error}",flush=True)
 
@@ -107,9 +85,7 @@ class MarketRadar:
         if px<=0:return
         now=time.time()
         with self.lock:
-            self.tickers[s]=data
-            h=self.history.setdefault(s,deque(maxlen=360));h.append((now,px))
-            cutoff=now-HISTORY_SECONDS
+            self.tickers[s]=data; h=self.history.setdefault(s,deque(maxlen=360)); h.append((now,px)); cutoff=now-HISTORY_SECONDS
             while h and h[0][0]<cutoff:h.popleft()
             self.last_update=now
 
@@ -118,9 +94,7 @@ class MarketRadar:
             msg=json.loads(raw)
             if isinstance(msg,list):
                 for data in msg:self._store_ticker(data)
-            else:
-                data=msg.get("data",msg) if isinstance(msg,dict) else None
-                self._store_ticker(data)
+            else:self._store_ticker(msg.get("data",msg) if isinstance(msg,dict) else None)
             self._refresh_universe()
         except Exception as exc:
             self.last_error=f"message: {exc}"[:240];print(f"[RADAR] {self.last_error}",flush=True)
@@ -145,8 +119,7 @@ class MarketRadar:
             if prev>0:returns.append((px/prev-1)*100)
             prev=px
         if len(returns)<5:return 0.0
-        mean=sum(returns)/len(returns)
-        return math.sqrt(sum((x-mean)**2 for x in returns)/len(returns))*math.sqrt(max(1,len(returns)))
+        mean=sum(returns)/len(returns); return math.sqrt(sum((x-mean)**2 for x in returns)/len(returns))*math.sqrt(max(1,len(returns)))
 
     @staticmethod
     def _activity(h,now):
@@ -158,13 +131,11 @@ class MarketRadar:
             if prev>0:moves.append(abs(px/prev-1)*100)
             prev=px
         if not moves:return 0.0
-        active=sum(1 for x in moves if x>=0.01)
-        return min(1.0,(active/max(1,len(moves)))*3.0)
+        active=sum(1 for x in moves if x>=0.01); return min(1.0,(active/max(1,len(moves)))*3.0)
 
     @staticmethod
     def _risk(m30,m60,m120,m240,vol,activity):
-        peak=max(abs(m30),abs(m60),abs(m120),abs(m240));acceleration=max(0.0,abs(m30)*2-abs(m120))
-        one_sided=(m30>0 and m60>0 and m120>0) or (m30<0 and m60<0 and m120<0)
+        peak=max(abs(m30),abs(m60),abs(m120),abs(m240));acceleration=max(0.0,abs(m30)*2-abs(m120));one_sided=(m30>0 and m60>0 and m120>0) or (m30<0 and m60<0 and m120<0)
         if peak>=3.0 or acceleration>=1.5:return "EXTREME","SPIKE/PUMP RISK"
         if peak>=1.5 and one_sided:return "HIGH","HIGH VOLATILITY"
         if vol>=0.8 and activity<0.30:return "HIGH","ERRATIC VOLATILITY"
@@ -178,8 +149,7 @@ class MarketRadar:
                 if self.tickers:break
             time.sleep(.15)
         self._refresh_universe(force=True);now=time.time()
-        with self.lock:
-            symbols=list(self.symbols);items=[(s,self.tickers.get(s.upper(),{})) for s in symbols]
+        with self.lock:symbols=list(self.symbols);items=[(s,self.tickers.get(s.upper(),{})) for s in symbols]
         rows=[]
         for s,d in items:
             if not d:continue
@@ -189,11 +159,11 @@ class MarketRadar:
             with self.lock:
                 hist=self.history.get(s.upper());h=list(hist) if hist else [];history_age=(now-h[0][0]) if h else 0.0
             if not h or history_age<20:continue
-            m30=self._return(h,price,now,30);m60=self._return(h,price,now,60);m120=self._return(h,price,now,120);m240=self._return(h,price,now,240)
-            vol=self._volatility(h,now);activity=self._activity(h,now);risk,risk_warning=self._risk(m30,m60,m120,m240,vol,activity)
+            m30=self._return(h,price,now,30);m60=self._return(h,price,now,60);m120=self._return(h,price,now,120);m240=self._return(h,price,now,240);vol=self._volatility(h,now);activity=self._activity(h,now);risk,risk_warning=self._risk(m30,m60,m120,m240,vol,activity)
             liquidity=min(1.0,max(0.0,math.log10(max(vol24,1))/10));impulse=min(1.0,max(0.0,abs(m60))/0.8);persistence=min(1.0,max(0.0,(abs(m30)+abs(m60)+abs(m120))/2.4));controlled_vol=min(1.0,max(0.0,vol/0.8));risk_penalty={"LOW":1.0,"MEDIUM":0.88,"HIGH":0.58,"EXTREME":0.15}[risk]
             direction=1 if m60>0 else (-1 if m60<0 else 0);directional_quality=min(1.0,max(0.0,(direction*m30+direction*m60+direction*m120)/1.2)) if direction else 0.0
-            score=100*(0.30*impulse+0.22*persistence+0.18*controlled_vol+0.15*activity+0.10*liquidity+0.05*directional_quality)*risk_penalty
+            # Approved Radar scoring weights: Scalp Activity 40%, Impulse 22%, Persistence 16%, Controlled Volatility 12%, Liquidity 7%, Directional Quality 3%.
+            score=100*(0.40*activity+0.22*impulse+0.16*persistence+0.12*controlled_vol+0.07*liquidity+0.03*directional_quality)*risk_penalty
             signal="BUY" if score>=55 and m30>0 and m60>0 and risk!="EXTREME" else ("WATCH" if score>=35 else "WAIT")
             target_pct=min(0.006,max(0.0035,abs(m60)/100*0.8))
             rows.append({"symbol":s[:-4]+"/USDT","price":price,"change_24h_pct":round(pct24,3),"quote_volume_24h":vol24,"score":round(score,2),"signal":signal,"tf":"1-4m","estimated_entry":price,"estimated_exit":price*(1+target_pct),"estimated_stop":price*(1-0.002),"change_3m_pct":round(m120,4),"change_30s_pct":round(m30,4),"change_1m_pct":round(m60,4),"change_2m_pct":round(m120,4),"change_4m_pct":round(m240,4),"volatility":round(vol,4),"scalp_activity":round(activity,3),"volume_ratio":round(liquidity,3),"pump_events":1 if risk=="EXTREME" else 0,"pump_score":round(max(0.0,abs(m30)*0.5+max(0.0,abs(m30)*2-abs(m120))),3),"risk":risk,"risk_warning":risk_warning,"hold_seconds":60,"history_age":round(history_age,1),"universe_size":len(symbols),"target_pct":round(target_pct*100,3)})
