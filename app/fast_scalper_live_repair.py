@@ -117,15 +117,8 @@ async def engine_repair_final():
             legacy.S['error']=f'Engine: {type(e).__name__}: {e}'; print(f'[ENGINE] {type(e).__name__}: {e}',flush=True); await asyncio.sleep(1)
 legacy.engine=engine_repair_final
 
+# Reference UI rule: do not redesign or rearrange the interface.
+# The only visual change here is expanding the existing six-slot block to ten slots.
 html=legacy.HTML
 html=html.replace('Slots · TOP-6','Slots · TOP-10').replace('AUTO TOP-6','AUTO TOP-10').replace('Array.from({length:6','Array.from({length:10').replace('for(let i=0;i<6;i++)','for(let i=0;i<10;i++)').replace('Maximum 6 pairs','Maximum 10 pairs')
-# Preserve the reference responsive grid: 3 columns on desktop, 2 on mobile.
-html=html.replace('.grid6{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}', '.grid6{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.grid6 .slot{display:block;width:100%;min-height:40px}')
-html=html.replace('.section-title{margin:0 0 12px;font-size:28px}', '.section-title{margin:0 0 12px;font-size:28px}.slots-title{font-size:26px!important}')
-html=html.replace('class="section-title">Slots', 'class="section-title slots-title">Slots')
-html=html.replace('<div class="card"><h2 class="section-title">Open Positions</h2><div id="pos" class="muted">No open positions</div></div>', '<div class="card"><h2 class="section-title">Open Positions</h2><div id="tradeStatus" class="trade-status">BOT ON · TRADING ACTIVE</div><div id="pos" class="muted">No open positions</div></div>')
-html=html.replace('.pos-line{display:grid;', '.trade-status{display:inline-block;font-size:11px;font-weight:900;padding:5px 9px;border-radius:8px;margin-bottom:8px;background:#078b53;color:#fff}.trade-status.off{background:#a72e3f}.pos-line{display:grid;')
-needle="function render(){const m=state.mode||'PAPER';"
-insert="function render(){const m=state.mode||'PAPER';const ts=$('tradeStatus');if(ts){const on=!!state.running;ts.textContent=on?'BOT ON · TRADING ACTIVE':(state.positions&&state.positions.length?'BOT OFF · CLOSING POSITIONS':'BOT OFF · TRADING STOPPED');ts.className='trade-status'+(on?'':' off');}"
-html=html.replace(needle,insert,1)
 legacy.HTML=html
