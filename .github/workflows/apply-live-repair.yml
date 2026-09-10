@@ -1,0 +1,35 @@
+name: Apply Fast Scalper live repair
+
+on:
+  push:
+    branches:
+      - fast-scalper-beta-0.01-repair-paper
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wire final repair
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('app/fast_scalper_patch.py')
+          s = p.read_text()
+          line = 'from . import fast_scalper_live_repair'
+          if line not in s:
+              p.write_text(s.rstrip() + '\n\n' + line + '\n')
+          wf = Path('.github/workflows/apply-live-repair.yml')
+          if wf.exists():
+              wf.unlink()
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/fast_scalper_patch.py .github/workflows/apply-live-repair.yml
+          git commit -m 'Wire final Fast Scalper repair and remove temporary workflow'
+          git push
