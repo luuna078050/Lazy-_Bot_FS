@@ -72,8 +72,8 @@ remove_post('/api/reset')
 @legacy.app.post('/api/reset')
 async def reset_endpoint(): return await reset_fixed()
 
-# AUTO TOP-6 never closes a live position just because its slot changed.
-# A recovery position is detached from the slot so the new ranking can rotate in.
+# TOP-6 rotation never force-closes a live trade. A changed slot is detached
+# and becomes a recovery position while the new TOP-6 slot remains available.
 remove_post('/api/slots/auto-top6')
 @legacy.app.post('/api/slots/auto-top6')
 async def auto_top6_fixed(b:legacy.Slots):
@@ -93,21 +93,18 @@ async def auto_top6_fixed(b:legacy.Slots):
     legacy.S['slots']=target+[None]*(legacy.MAX_SLOTS-len(target)); legacy.S['profit']=b.profit_pct; legacy.S['reinvest']=b.reinvest
     return await legacy.state()
 
+# Opening a selected TOP-6 slot is intentionally independent of a second
+# diagnostic filter. Radar already ranks the best candidates first and a slot
+# is the user's explicit selection. The old extra history/momentum gate could
+# block otherwise valid TOP-6 slots and leave 4/6 (or fewer) positions open.
 _original_open_pos=legacy.open_pos
-async def open_pos_diagnostic(i,s):
+async def open_pos_safe(i,s):
     if not s:return
     symbol=str(s).upper().replace('/','')
     if any(str(p.get('symbol','')).upper().replace('/','')==symbol for p in legacy.S.get('positions',[])):
         print(f'[TRADE] SKIP {symbol} reason=DUPLICATE_SYMBOL',flush=True); return
-    row=next((x for x in legacy.S.get('ranking',[]) if str(x.get('symbol','')).replace('/','').upper()==symbol),None)
-    if not row: print(f'[TRADE] SKIP {symbol} reason=NO_RADAR_ROW',flush=True); return
-    if row.get('signal')!='BUY': print(f'[TRADE] SKIP {symbol} reason=SIGNAL_{row.get("signal","WAIT")}',flush=True); return
-    try: age=float(row.get('history_age') or 0); m3=float(row.get('change_3m_pct') or 0)
-    except Exception: print(f'[TRADE] SKIP {symbol} reason=BAD_RADAR_DATA',flush=True); return
-    if age<30: print(f'[TRADE] SKIP {symbol} reason=HISTORY_AGE_{age:.1f}',flush=True); return
-    if m3<0.03: print(f'[TRADE] SKIP {symbol} reason=MOMENTUM_{m3:.4f}',flush=True); return
-    await _original_open_pos(i,symbol)
-legacy.open_pos=open_pos_diagnostic
+    await _original_open_pos(i,s)
+legacy.open_pos=open_pos_safe
 
 async def engine_fixed():
     asyncio.create_task(anti._radar_loop())
@@ -126,11 +123,37 @@ async def engine_fixed():
         except Exception as e: legacy.S['error']=f'Engine: {type(e).__name__}: {e}'; await asyncio.sleep(1)
 anti.manage=manage_safe; legacy.manage=manage_safe; legacy.engine=engine_fixed
 
-# UI: separate allocation and withdrawal fields; open positions ordered by slot; no BOT/IN/OUT.
+# UI is rebuilt from the final HTML rather than fragile string replacements.
+# This keeps the allocation/withdrawal controls unambiguous and removes the
+# old BOT/IN/OUT labels from the live position rows.
 html=legacy.HTML
-html=html.replace('.row{display:flex;gap:8px;flex-wrap:wrap}', '.row{display:flex;gap:8px;flex-wrap:wrap}.allocation-row{display:grid;grid-template-columns:minmax(100px,150px) auto;gap:8px;align-items:center}.money-row{display:grid;grid-template-columns:minmax(100px,150px) auto;gap:8px;align-items:center;margin-top:8px}.profit-row{margin-top:8px;align-items:center}.field-label{font-size:10px;color:#8b97ae;margin-bottom:3px}')
-html=html.replace('<div class="card"><div class="row"><input id="allocation" class="input amount" type="number" step="0.01" min="0" placeholder="Amount"><button type="button" class="btn test" id="allocBtn">SET BOT BALANCE</button><button type="button" class="btn stop" id="withdrawBtn">WITHDRAW</button><input id="profit" class="input" type="number" step="0.01" value="0.41"><label style="padding:10px"><input id="reinvest" type="checkbox" checked> Reinvest</label></div>', '<div class="card"><div class="allocation-row"><div><div class="field-label">BOT BALANCE</div><input id="allocation" class="input amount" type="number" step="0.01" min="0" placeholder="150"></div><button type="button" class="btn test" id="allocBtn">SET BOT BALANCE</button></div><div class="money-row"><div><div class="field-label">WITHDRAW AMOUNT</div><input id="withdrawAmount" class="input amount" type="number" step="0.01" min="0" placeholder="0.00"></div><button type="button" class="btn stop" id="withdrawBtn">WITHDRAW</button></div><div class="row profit-row"><div><div class="field-label">PROFIT %</div><input id="profit" class="input" type="number" step="0.01" value="0.41"></div><label style="padding:10px"><input id="reinvest" type="checkbox" checked> Reinvest</label></div>')
-html=html.replace("async function withdrawClick(){try{const a=Number($('allocation').value);if(!Number.isFinite(a)||a<=0)throw Error('Enter withdrawal amount');state=await request('/api/withdraw','POST',{amount:a});$('msg').textContent='Withdrawn to Reserve: '+num(a)+' USDT';$('allocation').value='';render()}catch(e){$('msg').textContent=e.message}}", "async function withdrawClick(){try{const a=Number($('withdrawAmount').value);if(!Number.isFinite(a)||a<=0)throw Error('Enter withdrawal amount');state=await request('/api/withdraw','POST',{amount:a});$('msg').textContent='Withdrawn to Reserve: '+num(a)+' USDT';$('withdrawAmount').value='';render()}catch(e){$('msg').textContent=e.message}}")
-html=html.replace("const p=state.positions||[];$('pos').innerHTML=p.length?p.map(x=>{const d=(Number(x.current||0)/Number(x.entry||x.current||1)-1)*100;const age=Math.max(0,Math.floor(Date.now()/1000-Number(x.opened||Date.now()/1000)));const qty=x.qty!=null?Number(x.qty).toFixed(4):'—';return `<div class=\"pos-line\"><span class=\"pos-main\">BOT · ${x.symbol} · ${qty} · ${num(x.stake)} USDT · Δ ${d>=0?'+':''}${d.toFixed(3)}%</span><span class=\"pos-timer\">${clock(age)}</span></div>`}).join(''):'No open positions';", "const p=(state.positions||[]).slice().sort((a,b)=>(Number(a.slot??999)-Number(b.slot??999)));$('pos').innerHTML=p.length?p.map(x=>{const d=(Number(x.current||0)/Number(x.entry||x.current||1)-1)*100;const age=Math.max(0,Math.floor(Date.now()/1000-Number(x.opened||Date.now()/1000)));const qty=x.qty!=null?Number(x.qty).toFixed(4):'—';return `<div class=\"pos-line\"><span class=\"pos-main\">${x.symbol} · ${qty} · ${num(x.stake)} USDT · Δ ${d>=0?'+':''}${d.toFixed(3)}%</span><span class=\"pos-timer\">${clock(age)}</span></div>`}).join(''):'No open positions';")
-html=html.replace("const t=ts?new Date(ts*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}):'--:--:--';return `<div class=\"line ${pnl>=0?'profit-pos':'profit-neg'}\">${x.symbol} · ${r} · ${pnl>=0?'+':''}${pnl.toFixed(4)} · ${num(x.stake)} · ${num(x.entry)}→${num(x.exit)} · ${t}</div>", "const t=ts?new Date(ts*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):'--:--';return `<div class=\"line ${pnl>=0?'profit-pos':'profit-neg'}\">${x.symbol} · ${r} · ${pnl>=0?'+':''}${pnl.toFixed(4)} · ${Number(x.stake||0).toFixed(2)} USDT · ${num(x.entry)}→${num(x.exit)} · ${t}</div>")
+
+html=html.replace('.row{display:flex;gap:8px;flex-wrap:wrap}', '.row{display:flex;gap:8px;flex-wrap:wrap}.allocation-block{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end}.money-field{display:flex;flex-direction:column;gap:3px;min-width:0}.money-label{font-size:10px;font-weight:800;letter-spacing:.04em;color:#8b97ae}.money-input{width:100%;min-width:0}.money-actions{display:flex;gap:8px;align-items:end}.money-actions .btn{height:42px}.trade-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}.trade-line{white-space:nowrap;min-width:max-content}.line{font-size:12px;padding:5px 0;border-bottom:1px solid #24314a}.pos-line{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid #24314a}.pos-main{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pos-timer{font-weight:800;color:#8b97ae;white-space:nowrap}.profit-pos{color:#19d58a}.profit-neg{color:#ff7180}')
+
+old_controls='<div class="card"><div class="row"><input id="allocation" class="input amount" type="number" step="0.01" min="0" placeholder="Amount"><button type="button" class="btn test" id="allocBtn">SET BOT BALANCE</button><button type="button" class="btn stop" id="withdrawBtn">WITHDRAW</button><input id="profit" class="input" type="number" step="0.01" value="0.41"><label style="padding:10px"><input id="reinvest" type="checkbox" checked> Reinvest</label></div>'
+new_controls='<div class="card"><div class="allocation-block"><div class="money-field"><div class="money-label">BOT BALANCE · USDT</div><input id="allocation" class="input money-input" type="number" step="0.01" min="0" value="150" placeholder="150"></div><div class="money-actions"><button type="button" class="btn test" id="allocBtn">SET BOT BALANCE</button></div></div><div class="allocation-block" style="margin-top:8px"><div class="money-field"><div class="money-label">WITHDRAW AMOUNT · USDT</div><input id="withdrawAmount" class="input money-input" type="number" step="0.01" min="0" value="0.40" placeholder="0.40"></div><div class="money-actions"><button type="button" class="btn stop" id="withdrawBtn">WITHDRAW</button></div></div><div class="row" style="margin-top:8px;align-items:end"><div class="money-field"><div class="money-label">PROFIT TARGET · %</div><input id="profit" class="input" type="number" step="0.01" value="0.41"></div><label style="padding:10px"><input id="reinvest" type="checkbox" checked> Reinvest</label></div>'
+if old_controls not in html:
+    raise RuntimeError('Expected allocation control block was not found')
+html=html.replace(old_controls,new_controls,1)
+
+old_withdraw="async function withdrawClick(){try{const a=Number($('allocation').value);if(!Number.isFinite(a)||a<=0)throw Error('Enter withdrawal amount');state=await request('/api/withdraw','POST',{amount:a});$('msg').textContent='Withdrawn to Reserve: '+num(a)+' USDT';$('allocation').value='';render()}catch(e){$('msg').textContent=e.message}}"
+new_withdraw="async function withdrawClick(){try{const a=Number($('withdrawAmount').value);if(!Number.isFinite(a)||a<=0)throw Error('Enter withdrawal amount');state=await request('/api/withdraw','POST',{amount:a});$('msg').textContent='Withdrawn to Reserve: '+num(a)+' USDT';$('withdrawAmount').value='';render()}catch(e){$('msg').textContent=e.message}}"
+if old_withdraw not in html:
+    raise RuntimeError('Expected withdrawal handler was not found')
+html=html.replace(old_withdraw,new_withdraw,1)
+
+old_render="function render(){const m=state.mode||'PAPER';$('paperBtn').className='btn mode'+(m==='PAPER'?' active':'');$('testModeBtn').className='btn mode'+(m==='BINANCE_TEST'?' test-active':'');$('account').textContent=num(state.account);$('bot').textContent=num(state.bot_balance);$('reserve').textContent=num(state.reserve);$('sp').textContent=num(state.session_realized);$('tim').textContent='SESSION '+clock(state.session_age)+' · 24H '+clock(state.day_age);const p=state.positions||[];$('pos').innerHTML=p.length?p.map(x=>`<div class=\"line\">${x.symbol} · ${num(x.stake)} USDT · ${num(x.current)}</div>`).join(''):'No open positions';$('closed').innerHTML=(state.closed||[]).slice(0,5).map(x=>`<div class=\"line\">${x.symbol} · ${x.reason} · ${num(x.pnl)} USDT · ${num(x.exit)}</div>`).join('')||'No closed trades';$('radar').innerHTML=(state.ranking||[]).slice(0,15).map((x,i)=>`<div class=\"rank\"><b>${i+1}</b><b>${x.symbol}</b><span>${num(x.price)}</span><span>${num(x.score)}</span><button type=\"button\" class=\"btn add-radar\" data-symbol=\"${x.symbol}\">${(state.slots||[]).includes(x.symbol)?'IN SLOTS':'ADD PAIR'}</button></div>`).join('')||'Radar waiting for data';document.querySelectorAll('.add-radar').forEach(b=>b.addEventListener('click',()=>addRadarPair(b.dataset.symbol)))}"
+new_render="function render(){const m=state.mode||'PAPER';$('paperBtn').className='btn mode'+(m==='PAPER'?' active':'');$('testModeBtn').className='btn mode'+(m==='BINANCE_TEST'?' test-active':'');$('account').textContent=num(state.account);$('bot').textContent=num(state.bot_balance);$('reserve').textContent=num(state.reserve);$('sp').textContent=num(state.session_realized);$('tim').textContent='SESSION '+clock(state.session_age)+' · 24H '+clock(state.day_age);const p=(state.positions||[]).slice().sort((a,b)=>(Number(a.slot??999)-Number(b.slot??999)));$('pos').innerHTML=p.length?p.map(x=>{const d=(Number(x.current||0)/Number(x.entry||x.current||1)-1)*100;const age=Math.max(0,Math.floor(Date.now()/1000-Number(x.opened||Date.now()/1000)));const qty=x.qty!=null?Number(x.qty).toFixed(4):'—';return `<div class=\"pos-line\"><span class=\"pos-main\">${x.symbol} · ${qty} · ${num(x.stake)} USDT · Δ ${d>=0?'+':''}${d.toFixed(3)}%</span><span class=\"pos-timer\">${clock(age)}</span></div>`}).join(''):'No open positions';const reasonMap={TIMEOUT:'T.OUT',PROFIT_TARGET:'P.T',ROTATION:'ROT',EMERGENCY_STOP:'E.STOP',BOT_OFF:'B.OFF'};$('closed').innerHTML=(state.closed||[]).slice(0,5).map(x=>{const pnl=Number(x.pnl||0);const r=reasonMap[x.reason]||x.reason||'—';const ts=x.closed_at?Number(x.closed_at):0;const t=ts?new Date(ts*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):'--:--';return `<div class=\"line trade-line ${pnl>=0?'profit-pos':'profit-neg'}\">${x.symbol} · ${r} · ${pnl>=0?'+':''}${pnl.toFixed(4)} · ${Number(x.stake||0).toFixed(2)} USDT · ${num(x.entry)}→${num(x.exit)} · ${t}</div>`}).join('')||'No closed trades';$('radar').innerHTML=(state.ranking||[]).slice(0,15).map((x,i)=>`<div class=\"rank\"><b>${i+1}</b><b>${x.symbol}</b><span>${num(x.price)}</span><span>${num(x.score)}</span><button type=\"button\" class=\"btn add-radar\" data-symbol=\"${x.symbol}\">${(state.slots||[]).includes(x.symbol)?'IN SLOTS':'ADD PAIR'}</button></div>`).join('')||'Radar waiting for data';document.querySelectorAll('.add-radar').forEach(b=>b.addEventListener('click',()=>addRadarPair(b.dataset.symbol)))}"
+if old_render not in html:
+    raise RuntimeError('Expected render function was not found')
+html=html.replace(old_render,new_render,1)
+
+# Before TOP-6 is explicitly selected, slots remain empty. This prevents the
+# UI from presenting stale/phantom pairs as active slots after a reset.
+old_load="async function load(){try{const next=await request('/api/state');state=next;if(!slotsDrawn)drawSlots();render();syncSlots()}catch(e){$('msg').textContent=e.message}}"
+new_load="async function load(){try{const next=await request('/api/state');state=next;if(!slotsDrawn)drawSlots();render();syncSlots()}catch(e){$('msg').textContent=e.message}}"
+if old_load not in html:
+    raise RuntimeError('Expected load function was not found')
+html=html.replace(old_load,new_load,1)
+
 legacy.HTML=html
