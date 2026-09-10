@@ -91,8 +91,6 @@ async def auto_top6_fixed(b:legacy.Slots):
     legacy.S['slots']=target+[None]*(legacy.MAX_SLOTS-len(target)); legacy.S['profit']=b.profit_pct; legacy.S['reinvest']=b.reinvest
     return await legacy.state()
 
-# Binance Spot order filters are dynamic. Cache the per-symbol minimum notional
-# so 10-slot allocation does not repeatedly hammer a pair with -1013 NOTIONAL.
 _NOTIONAL_CACHE={}
 _NOTIONAL_TTL=300.0
 async def symbol_min_notional(symbol):
@@ -178,6 +176,23 @@ async def engine_fixed():
         except asyncio.CancelledError: raise
         except Exception as e: legacy.S['error']=f'Engine: {type(e).__name__}: {e}'; print(f'[ENGINE] {type(e).__name__}: {e}',flush=True); await asyncio.sleep(1)
 anti.manage=manage_safe; legacy.manage=manage_safe; legacy.engine=engine_fixed
+
+# The final UI patch is imported after this module. Add the Radar ADD PAIR
+# click handler at startup so it survives the later HTML/render replacement.
+async def _install_radar_add_pair_handler():
+    try:
+        html=legacy.HTML
+        if 'data-radar-add-handler' in html:
+            return
+        handler='''<script data-radar-add-handler>document.addEventListener("click",function(e){const b=e.target.closest(".add-radar");if(!b)return;const s=b.dataset.symbol;if(typeof addRadarPair==="function")addRadarPair(s);});</script>'''
+        if '</body>' in html:
+            legacy.HTML=html.replace('</body>',handler+'</body>',1)
+        else:
+            legacy.HTML=html+handler
+    except Exception as e:
+        print(f'[UI] ADD_PAIR_HANDLER_ERROR {type(e).__name__}: {e}',flush=True)
+
+legacy.app.router.on_startup.append(_install_radar_add_pair_handler)
 
 legacy.HTML=legacy.HTML
 
