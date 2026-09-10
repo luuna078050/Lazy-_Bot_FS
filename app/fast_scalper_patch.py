@@ -105,19 +105,15 @@ async def symbol_min_notional(symbol):
             r=await c.get(legacy.B.base+'/v3/exchangeInfo',params={'symbol':symbol})
             r.raise_for_status(); data=r.json()
         rows=data.get('symbols') or []
-        if not rows:
-            raise RuntimeError(f'Binance exchangeInfo has no symbol {symbol}')
+        if not rows: raise RuntimeError(f'Binance exchangeInfo has no symbol {symbol}')
         minimum=0.0
         for f in rows[0].get('filters',[]):
             ft=f.get('filterType')
-            if ft=='NOTIONAL' and f.get('applyMinToMarket',True):
-                minimum=max(minimum,float(f.get('minNotional') or 0))
-            elif ft=='MIN_NOTIONAL' and f.get('applyToMarket',True):
-                minimum=max(minimum,float(f.get('minNotional') or 0))
+            if ft=='NOTIONAL' and f.get('applyMinToMarket',True): minimum=max(minimum,float(f.get('minNotional') or 0))
+            elif ft=='MIN_NOTIONAL' and f.get('applyToMarket',True): minimum=max(minimum,float(f.get('minNotional') or 0))
         _NOTIONAL_CACHE[symbol]=(time.time(),minimum)
         return minimum
     except Exception as e:
-        # Do not block PAPER mode or make a missing filter lookup fatal.
         print(f'[TRADE] FILTER_LOOKUP {symbol} failed: {type(e).__name__}: {e}',flush=True)
         return 0.0
 
@@ -127,38 +123,22 @@ async def open_pos_safe(i,s):
     symbol=str(s).upper().replace('/','')
     if any(str(p.get('symbol','')).upper().replace('/','')==symbol for p in legacy.S.get('positions',[])):
         print(f'[TRADE] SKIP {symbol} reason=DUPLICATE_SYMBOL',flush=True); return
-
-    # PAPER keeps the existing fast path and therefore opens immediately after BOT ON.
     if legacy.S.get('mode')!='BINANCE_TEST':
-        await _original_open_pos(i,s)
-        return
-
-    free=float(legacy.S.get('free',0.0) or 0.0)
-    bot=float(legacy.S.get('bot',0.0) or 0.0)
-    slots=sum(1 for x in legacy.S.get('slots',[]) if x)
+        await _original_open_pos(i,s); return
+    free=float(legacy.S.get('free',0.0) or 0.0); bot=float(legacy.S.get('bot',0.0) or 0.0); slots=sum(1 for x in legacy.S.get('slots',[]) if x)
     if free<=0 or bot<=0 or slots<=0:return
-
-    allocated=min(free,bot/slots)
-    minimum=await symbol_min_notional(symbol)
-    stake=allocated
-    if minimum>0 and stake < minimum:
-        if free+1e-9 < minimum:
+    allocated=min(free,bot/slots); minimum=await symbol_min_notional(symbol); stake=allocated
+    if minimum>0 and stake<minimum:
+        if free+1e-9<minimum:
             print(f'[TRADE] SKIP {symbol} reason=NOTIONAL min={minimum:.4f} free={free:.4f} alloc={allocated:.4f}',flush=True)
-            legacy.S['error']=f'Binance BUY {symbol}: skipped, min notional {minimum:.4f} > free {free:.4f}'
-            return
-        stake=min(free,minimum*1.02)
-        print(f'[TRADE] SIZE_UP {symbol} min={minimum:.4f} alloc={allocated:.4f} stake={stake:.4f}',flush=True)
-
-    async def place(q):
-        return await legacy.B.market_buy(symbol,q)
-
+            legacy.S['error']=f'Binance BUY {symbol}: skipped, min notional {minimum:.4f} > free {free:.4f}'; return
+        stake=min(free,minimum*1.02); print(f'[TRADE] SIZE_UP {symbol} min={minimum:.4f} alloc={allocated:.4f} stake={stake:.4f}',flush=True)
+    async def place(q): return await legacy.B.market_buy(symbol,q)
     try:
         r=await place(stake); status=r.get('status','')
         if status!='FILLED': raise RuntimeError(f'Binance BUY not filled: {status or r}')
     except Exception as e:
         text=str(e)
-        # Market orders use the average market price for NOTIONAL validation.
-        # If it moved through the boundary, retry once with a small safety margin.
         if '-1013' in text and 'NOTIONAL' in text:
             retry_min=max(minimum,stake)*1.08
             if retry_min<=free+1e-9 and retry_min>stake:
@@ -168,29 +148,17 @@ async def open_pos_safe(i,s):
                     if status!='FILLED': raise RuntimeError(f'Binance BUY not filled: {status or r}')
                     stake=retry_min
                 except Exception as e2:
-                    legacy.S['error']=f'Binance BUY {symbol}: {type(e2).__name__}: {e2}'
-                    print(f'[TRADE] BUY_ERROR {symbol} slot={i} {type(e2).__name__}: {e2}',flush=True)
-                    return
+                    legacy.S['error']=f'Binance BUY {symbol}: {type(e2).__name__}: {e2}'; print(f'[TRADE] BUY_ERROR {symbol} slot={i} {type(e2).__name__}: {e2}',flush=True); return
             else:
-                legacy.S['error']=f'Binance BUY {symbol}: {text}'
-                print(f'[TRADE] BUY_ERROR {symbol} slot={i} {text}',flush=True)
-                return
+                legacy.S['error']=f'Binance BUY {symbol}: {text}'; print(f'[TRADE] BUY_ERROR {symbol} slot={i} {text}',flush=True); return
         else:
-            legacy.S['error']=f'Binance BUY {symbol}: {type(e).__name__}: {e}'
-            print(f'[TRADE] BUY_ERROR {symbol} slot={i} {type(e).__name__}: {e}',flush=True)
-            return
-
+            legacy.S['error']=f'Binance BUY {symbol}: {type(e).__name__}: {e}'; print(f'[TRADE] BUY_ERROR {symbol} slot={i} {type(e).__name__}: {e}',flush=True); return
     qty=float(r.get('executedQty') or 0); spent=float(r.get('cummulativeQuoteQty') or 0)
     if qty<=0 or spent<=0:
-        legacy.S['error']=f'Binance BUY {symbol}: empty fill {r}'
-        print(f'[TRADE] BUY_ERROR {symbol} slot={i} empty fill',flush=True)
-        return
-    ep=spent/qty
-    legacy.S['free']=max(0.0,float(legacy.S.get('free',0.0))-spent)
+        legacy.S['error']=f'Binance BUY {symbol}: empty fill {r}'; print(f'[TRADE] BUY_ERROR {symbol} slot={i} empty fill',flush=True); return
+    ep=spent/qty; legacy.S['free']=max(0.0,float(legacy.S.get('free',0.0))-spent)
     p={'id':f"B{r.get('orderId',int(time.time()*1000))}",'slot':i,'symbol':symbol,'tf':legacy.TF,'entry':ep,'current':ep,'stake':spent,'qty':qty,'opened':time.time(),'opened_at':legacy.now(),'order_id':r.get('orderId')}
-    legacy.S['positions'].append(p)
-    legacy.S['orders'].insert(0,{'time':legacy.now(),'symbol':symbol,'side':'BUY','status':status,'price':ep,'qty':qty,'stake':spent,'order_id':r.get('orderId'),'slot':i})
-    legacy.S['error']=None
+    legacy.S['positions'].append(p); legacy.S['orders'].insert(0,{'time':legacy.now(),'symbol':symbol,'side':'BUY','status':status,'price':ep,'qty':qty,'stake':spent,'order_id':r.get('orderId'),'slot':i}); legacy.S['error']=None
     print(f'[TRADE] BUY FILLED {symbol} slot={i+1} stake={spent:.4f} price={ep:.8f} qty={qty:.8f}',flush=True)
 legacy.open_pos=open_pos_safe
 
@@ -212,3 +180,7 @@ async def engine_fixed():
 anti.manage=manage_safe; legacy.manage=manage_safe; legacy.engine=engine_fixed
 
 legacy.HTML=legacy.HTML
+
+# Load the production repair layer now, then apply the final lifecycle/UI patch.
+from . import fast_scalper_live_repair
+from . import fast_scalper_final_patch
