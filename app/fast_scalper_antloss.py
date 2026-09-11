@@ -8,6 +8,8 @@ COOLDOWN_TIMEOUT=20.0
 COOLDOWN_ERROR=10.0
 MIN_SIGNAL_AGE=30.0
 MIN_3M_MOMENTUM=0.03
+COOLDOWN_MAX_HOLD=20.0
+MAX_HOLD=300.0
 _cooldowns={}
 _last_radar_refresh=0.0
 _radar_lock=asyncio.Lock()
@@ -79,44 +81,71 @@ async def _close_at_snapshot(p, reason, snapshot):
 
 async def manage():
     now=time.time()
-    for p in list(legacy.S['positions']):
+    stop_at=legacy.S.get('stop_requested')
+    for p in list(legacy.S.get('positions', [])):
         try:
             snapshot = legacy.price(p['symbol']) or p['current']
             p['current'] = snapshot
-            live = (snapshot / p['entry'] - 1) * 100
-            age = now - p['opened']
-            if legacy.S['profit'] > 0 and live >= legacy.S['profit']:
-                print(f"[TRADE] CLOSE {p['symbol']} reason=PROFIT_TARGET age={age:.1f}s live={live:.4f}% price={snapshot}", flush=True)
-                await _close_at_snapshot(p, 'PROFIT_TARGET', snapshot)
+            entry=float(p.get('entry') or 0)
+            live=((snapshot/entry)-1)*100 if entry else 0.0
+            age=now-float(p.get('opened') or now)
+            p['age_seconds']=int(max(0,age)); p['age']=p['age_seconds']
+
+            # Always close using the same price snapshot that triggered the rule.
+            # This removes the race where the trigger was positive but legacy.close()
+            # fetched a second, lower price and recorded a negative PROFIT_TARGET/TIMEOUT.
+            if legacy.S.get('profit',0)>0 and live>=float(legacy.S['profit']):
+                print(f"[TRADE] CLOSE {p['symbol']} reason=PROFIT_TARGET age={age:.1f}s live={live:.4f}% price={snapshot}",flush=True)
+                await _close_at_snapshot(p,'PROFIT_TARGET',snapshot)
                 _cooldowns[p['symbol']]=time.time()+COOLDOWN_PROFIT
                 continue
-            if age >= legacy.MAX_AGE:
-                print(f"[TRADE] CLOSE {p['symbol']} reason=TIMEOUT age={age:.1f}s live={live:.4f}% price={snapshot}", flush=True)
-                await _close_at_snapshot(p, 'TIMEOUT', snapshot)
-                _cooldowns[p['symbol']]=time.time()+COOLDOWN_TIMEOUT
-                continue
-        except Exception as e:
-            legacy.S['error'] = f'Manage {p.get("symbol")}: {type(e).__name__}: {e}'
-            _cooldowns[p.get('symbol','')]=time.time()+COOLDOWN_ERROR
 
-_original_open_pos = legacy.open_pos
-async def open_pos_filtered(i, s):
+            # BOT OFF is authoritative: close every position at the same snapshot.
+            if stop_at:
+                print(f"[TRADE] CLOSE {p['symbol']} reason=BOT_OFF age={age:.1f}s live={live:.4f}% price={snapshot}",flush=True)
+                await _close_at_snapshot(p,'BOT_OFF',snapshot)
+                continue
+
+            # Normal timeout only closes non-negative positions. A losing position
+            # is deferred, then hard-closed at MAX_HOLD rather than being silently
+            # converted into a negative TIMEOUT by a second price read.
+            if age>=float(getattr(legacy,'MAX_AGE',60) or 60):
+                if live>=0:
+                    print(f"[TRADE] CLOSE {p['symbol']} reason=TIMEOUT age={age:.1f}s live={live:.4f}% price={snapshot}",flush=True)
+                    await _close_at_snapshot(p,'TIMEOUT',snapshot)
+                    _cooldowns[p['symbol']]=time.time()+COOLDOWN_TIMEOUT
+                elif age>=MAX_HOLD:
+                    print(f"[TRADE] CLOSE {p['symbol']} reason=MAX_HOLD age={age:.1f}s live={live:.4f}% price={snapshot}",flush=True)
+                    await _close_at_snapshot(p,'MAX_HOLD',snapshot)
+                    _cooldowns[p['symbol']]=time.time()+COOLDOWN_MAX_HOLD
+                else:
+                    p['timeout_armed']=True
+                    print(f"[TRADE] HOLD {p['symbol']} reason=TIMEOUT_DEFERRED age={age:.1f}s live={live:.4f}% price={snapshot}",flush=True)
+            elif age>=MAX_HOLD:
+                print(f"[TRADE] CLOSE {p['symbol']} reason=MAX_HOLD age={age:.1f}s live={live:.4f}% price={snapshot}",flush=True)
+                await _close_at_snapshot(p,'MAX_HOLD',snapshot)
+                _cooldowns[p['symbol']]=time.time()+COOLDOWN_MAX_HOLD
+        except Exception as e:
+            legacy.S['error']=f'Manage {p.get("symbol")}: {type(e).__name__}: {e}'
+            _cooldowns[p.get('symbol','')]=time.time()+COOLDOWN_ERROR
+            print(f'[ENGINE] MANAGE_ERROR {p.get("symbol")} {type(e).__name__}: {e}',flush=True)
+    if stop_at and not legacy.S.get('positions'):
+        legacy.S['stop_requested']=None
+
+_original_open_pos=legacy.open_pos
+async def open_pos_filtered(i,s):
     if not s:return
     s=str(s).upper().replace('/','')
     now=time.time()
-    until=_cooldowns.get(s,0.0)
-    if until>now:return
-    # A symbol may occupy only one live position at a time. This prevents
-    # slot rotation from opening a duplicate symbol while the old slot is
-    # still holding it.
+    if _cooldowns.get(s,0.0)>now:
+        return
     if any(str(p.get('symbol','')).upper().replace('/','')==s for p in legacy.S.get('positions',[])):
         return
     row=next((x for x in legacy.S.get('ranking',[]) if str(x.get('symbol','')).replace('/','').upper()==s),None)
     if not row or row.get('signal')!='BUY':
         return
     try:
-        m3=float(row.get('change_3m_pct') or 0.0)
-        hist_age=float(row.get('history_age') or 0.0)
+        m3=float(row.get('change_3m_pct') or 0.0); hist_age=float(row.get('history_age') or 0.0)
     except (TypeError,ValueError):
         return
     if hist_age<MIN_SIGNAL_AGE or m3<MIN_3M_MOMENTUM:
@@ -125,8 +154,7 @@ async def open_pos_filtered(i, s):
     await _original_open_pos(i,s)
     for p in legacy.S.get('positions',[]):
         if p.get('id') not in before_ids and p.get('slot')==i and p.get('symbol')==s:
-            p.setdefault('timeout_armed',False)
-            p['signal_3m']=m3
+            p.setdefault('timeout_armed',False); p['signal_3m']=m3
             print(f"[TRADE] OPEN {p.get('symbol')} slot={p.get('slot')} stake={p.get('stake')} entry={p.get('entry')} opened_at={p.get('opened_at')} mode={legacy.S.get('mode')} signal3m={m3:.4f}%",flush=True)
             break
 legacy.open_pos=open_pos_filtered
@@ -159,11 +187,28 @@ async def engine_fixed():
                         await legacy.open_pos(i,s)
                         occupied_symbols={str(p.get('symbol','')).upper().replace('/','') for p in legacy.S.get('positions',[])}
             await asyncio.sleep(1)
-        except asyncio.CancelledError:
-            raise
+        except asyncio.CancelledError: raise
         except Exception as e:
             legacy.S['error']=f'Engine: {type(e).__name__}: {e}'
             await asyncio.sleep(1)
 
 legacy.manage=manage
 legacy.engine=engine_fixed
+
+# This runs after all imported repair/final-patch modules have installed their
+# functions. It restores the anti-loss lifecycle on top without changing the
+# approved Radar, TOP-10 slots, allocation, or other UI controls.
+async def _final_lifecycle_guard():
+    legacy.manage=manage
+    legacy.open_pos=open_pos_filtered
+    try:
+        html=legacy.HTML
+        if 'data-closed-short-labels' not in html:
+            marker='''<script data-closed-short-labels>(function(){const m={PROFIT_TARGET:'PT',TIMEOUT:'TO',MAX_HOLD:'MH',BOT_OFF:'OFF',ROTATION:'ROT',EMERGENCY_POSITION:'EMG',EMERGENCY_STOP:'ESTOP'};const f=window.__fsShortReason||function(r){return m[r]||r};window.__fsShortReason=f;document.addEventListener('click',function(){},false);})();</script>'''
+            html=html.replace('</body>',marker+'</body>',1) if '</body>' in html else html+marker
+            html=html.replace('${x.symbol} · ${x.reason}','${x.symbol} · ${window.__fsShortReason?window.__fsShortReason(x.reason):x.reason}')
+            legacy.HTML=html
+    except Exception as e:
+        print(f'[UI] CLOSED_SHORT_LABELS_ERROR {type(e).__name__}: {e}',flush=True)
+
+legacy.app.router.on_startup.append(_final_lifecycle_guard)
