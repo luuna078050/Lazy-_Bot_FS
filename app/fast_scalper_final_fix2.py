@@ -4,8 +4,6 @@ from fastapi import HTTPException
 from pydantic import BaseModel
 import time, re
 
-# Lifecycle: 90s is a SOFT timeout. A losing position is allowed to wait for
-# break-even. 300s is the hard safety cap.
 MAX_HOLD = 300.0
 
 async def manage_fixed2():
@@ -41,7 +39,7 @@ async def reset_fixed2():
     for p in list(legacy.S.get('positions',[])):
         if not await final.close_safe(p,'RESET'):
             raise HTTPException(502,legacy.S.get('error') or f'Could not close {p.get("symbol")}')
-    legacy.S['slots']=[None]*10; legacy.S['profit']=0.0; legacy.S['reinvest']=False
+    legacy.S['slots']=[None]*20; legacy.S['profit']=0.33; legacy.S['reinvest']=False
     legacy.S['session_elapsed']=0.0; legacy.S['session_realized']=0.0; legacy.S['session_trades']=0
     legacy.S['session_started']=None; legacy.S['day_started']=None; legacy.S['cycle']=0; legacy.S['last_radar']=0.0; legacy.S['error']=None
     if legacy.S.get('mode')=='PAPER':
@@ -130,10 +128,5 @@ html=html.replace('for(let i=0;i<6;i++)', 'for(let i=0;i<10;i++)')
 compact='''<style data-final-compact-ui>\n.section-title{font-size:26px!important;line-height:1.1!important;margin:0 0 10px!important}\n.pos-line,.closed-line{font-size:12px!important;line-height:1.15!important}\n.rank{font-size:10px!important}\n@media(max-width:650px){.section-title{font-size:24px!important}.pos-line,.closed-line{font-size:12px!important}}\n</style>'''
 if 'data-final-compact-ui' not in html: html=html.replace('</head>',compact+'</head>',1)
 legacy.HTML=html
-
-# Nudge marker for the test deploy/control-plane refresh.
 BUILD_MARKER='dff2b92ef43b91b2db8ef97c361197b931bb8ed0'
-
-# Candidate strategy is loaded after the legacy/final slot patch so it can
-# replace the old TOP-10 rotation and unconditional slot-entry behavior.
 from . import fast_scalper_candidate_logic
