@@ -4,6 +4,11 @@ from datetime import datetime, timezone
 
 from . import fast_scalper_beta_001_legacy as legacy
 from . import fast_scalper_final_patch as final
+from . import fast_scalper_radar_timeframes_fix  # noqa: F401
+
+# Requested maximum normal trade duration: 90 seconds.
+# Profit target can close earlier; 90s is the timeout horizon.
+legacy.MAX_AGE = 90
 
 _original_final_close_safe = final.close_safe
 
