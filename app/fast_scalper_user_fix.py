@@ -1,7 +1,8 @@
 from __future__ import annotations
-import re, time
+import time
 from fastapi import HTTPException
 from . import fast_scalper_beta_001_legacy as legacy
+from . import fast_scalper_candidate_logic as candidate
 from .market_radar import RADAR
 
 TRADE_SLOTS = 10
@@ -78,7 +79,8 @@ async def manage_userfix():
             legacy.S['error']=f'Manage {p.get("symbol")}: {type(e).__name__}: {e}'
 legacy.manage=manage_userfix
 
-_old_open=legacy.open_pos
+# Bypass the candidate's older 5-entry wrapper: the current requirement is up to 10 active trading pairs.
+_old_open=getattr(candidate,'_original_open_candidate',legacy.open_pos)
 async def open_userfix(i,symbol):
     if i >= TRADE_SLOTS or not symbol or len(legacy.S.get('positions',[])) >= TRADE_SLOTS: return
     s=str(symbol).upper().replace('/','')
