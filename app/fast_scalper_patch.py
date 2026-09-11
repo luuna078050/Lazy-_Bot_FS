@@ -199,3 +199,4 @@ legacy.HTML=legacy.HTML
 # Load the production repair layer now, then apply the final lifecycle/UI patch.
 from . import fast_scalper_live_repair
 from . import fast_scalper_final_patch
+from . import fast_scalper_snapshot_fix
