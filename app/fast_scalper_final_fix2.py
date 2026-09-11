@@ -133,3 +133,7 @@ legacy.HTML=html
 
 # Nudge marker for the test deploy/control-plane refresh.
 BUILD_MARKER='dff2b92ef43b91b2db8ef97c361197b931bb8ed0'
+
+# Candidate strategy is loaded after the legacy/final slot patch so it can
+# replace the old TOP-10 rotation and unconditional slot-entry behavior.
+from . import fast_scalper_candidate_logic
