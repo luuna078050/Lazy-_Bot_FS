@@ -8,3 +8,4 @@ START = legacy.START
 
 from . import fast_scalper_runtime  # noqa: F401,E402
 from . import fast_scalper_approved_ui  # noqa: F401,E402
+from . import fast_scalper_auto_top  # noqa: F401,E402
