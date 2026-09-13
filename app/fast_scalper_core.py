@@ -13,6 +13,8 @@ DEFAULT_PAPER_BOT = 150.0
 SOFT_TIMEOUT = 90.0
 HARD_TIMEOUT = 300.0
 
+legacy.S['auto_top'] = True
+
 def _indicators(symbol):
     s = str(symbol).upper().replace('/', '')
     with RADAR.lock:
@@ -23,8 +25,7 @@ def _indicators(symbol):
         return {'ready': False, 'tf': tf, 'ema9': 0.0, 'ema21': 0.0, 'rsi': 50.0}
     vals = closes[-60:]
     def ema(period):
-        k = 2.0 / (period + 1.0)
-        e = vals[0]
+        k = 2.0 / (period + 1.0); e = vals[0]
         for v in vals[1:]: e = float(v) * k + e * (1.0 - k)
         return e
     gains, losses = [], []
@@ -54,11 +55,13 @@ async def radar_core(force=False):
             score=float(x.get('score',0) or 0)+c*4.0+max(0.0,float(x.get('pump_score',0) or 0))*4.0
             row=dict(x); row.update({'entry_allowed':usable,'entry_score':round(score,2),'entry_confirmations':c,'ema9_3m':round(ind['ema9'],10),'ema21_3m':round(ind['ema21'],10),'rsi14_3m':round(ind['rsi'],2),'indicator_tf':ind['tf'],'candidate_pool':'TOP-20','signal':'BUY' if usable else 'WATCH'}); ranked.append(row)
         ranked.sort(key=lambda z:(float(z.get('entry_score',0)),float(z.get('score',0))),reverse=True)
-        legacy.S['ranking']=ranked[:ROTATION_POOL]; legacy.S['last_radar']=time.time(); legacy.S['error']=None if not getattr(RADAR,'last_error',None) else 'Radar WebSocket: '+RADAR.last_error; refresh_slots()
+        legacy.S['ranking']=ranked[:ROTATION_POOL]; legacy.S['last_radar']=time.time(); legacy.S['error']=None if not getattr(RADAR,'last_error',None) else 'Radar WebSocket: '+RADAR.last_error
+        refresh_slots()
     except Exception as e:
         legacy.S['error']=f'Radar: {type(e).__name__}: {e}'; legacy.S['last_radar']=time.time()
 
 def refresh_slots():
+    if not legacy.S.get('auto_top', True): return
     ranked=[]; seen=set()
     for x in legacy.S.get('ranking',[]):
         s=str(x.get('symbol','')).upper().replace('/','')
@@ -133,7 +136,7 @@ for r in list(legacy.app.router.routes):
 async def reset_core():
     if legacy.S.get('running'): raise HTTPException(400,'STOP the bot before RESET')
     for p in list(legacy.S.get('positions',[])): await legacy.close(p,'RESET')
-    legacy.S['slots']=[None]*ROTATION_POOL; legacy.S['profit']=DEFAULT_PROFIT; legacy.S['reinvest']=True; legacy.S['stop_requested']=None
+    legacy.S['slots']=[None]*ROTATION_POOL; legacy.S['auto_top']=True; legacy.S['profit']=DEFAULT_PROFIT; legacy.S['reinvest']=True; legacy.S['stop_requested']=None
     legacy.S['session_elapsed']=0.0; legacy.S['session_realized']=0.0; legacy.S['session_trades']=0; legacy.S['session_started']=None; legacy.S['day_started']=None; legacy.S['cycle']=0; legacy.S['last_radar']=0.0; legacy.S['error']=None
     if legacy.S.get('mode')=='PAPER': legacy.S['account']=legacy.START; legacy.S['bot']=DEFAULT_PAPER_BOT; legacy.S['free']=DEFAULT_PAPER_BOT; legacy.S['reserve']=max(0.0,legacy.S['account']-legacy.S['bot'])
     return await legacy.state()
@@ -142,6 +145,7 @@ class SlotsBody(BaseModel):
     slots:list[str]=[]
     profit_pct:float=DEFAULT_PROFIT
     reinvest:bool=True
+    auto_top:bool=False
 for r in list(legacy.app.router.routes):
     if getattr(r,'path',None)=='/api/slots' and 'POST' in (getattr(r,'methods',set()) or set()): legacy.app.router.routes.remove(r)
 @legacy.app.post('/api/slots')
@@ -157,10 +161,22 @@ async def slots_core(b:SlotsBody):
     occupied={int(p.get('slot')) for p in legacy.S.get('positions',[]) if str(p.get('slot','')).lstrip('-').isdigit()}
     for i in occupied:
         if old[i] and new[i]!=old[i]: new[i]=old[i]
-    legacy.S['slots']=new; legacy.S['profit']=float(b.profit_pct); legacy.S['reinvest']=bool(b.reinvest); return await legacy.state()
+    legacy.S['slots']=new; legacy.S['auto_top']=bool(b.auto_top); legacy.S['profit']=float(b.profit_pct); legacy.S['reinvest']=bool(b.reinvest)
+    if legacy.S['auto_top']: refresh_slots()
+    return await legacy.state()
+
+class AutoTopBody(BaseModel):
+    enabled: bool
+for r in list(legacy.app.router.routes):
+    if getattr(r,'path',None)=='/api/auto-top' and 'POST' in (getattr(r,'methods',set()) or set()): legacy.app.router.routes.remove(r)
+@legacy.app.post('/api/auto-top')
+async def auto_top_core(b:AutoTopBody):
+    legacy.S['auto_top']=bool(b.enabled)
+    if legacy.S['auto_top']: refresh_slots()
+    return await legacy.state()
 
 legacy.S['profit']=DEFAULT_PROFIT
 legacy.S['reinvest']=True
 if legacy.S.get('mode')=='PAPER' and float(legacy.S.get('bot') or 0)<=0:
     legacy.S['bot']=DEFAULT_PAPER_BOT; legacy.S['free']=DEFAULT_PAPER_BOT; legacy.S['reserve']=max(0.0,legacy.S['account']-legacy.S['bot'])
-print('FAST_SCALPER_CORE ROTATION_POOL=20 TRADE_SLOTS=10 TP_DEFAULT=0.33 PAPER_BOT_DEFAULT=150 SOFT=90 HARD=300',flush=True)
+print('FAST_SCALPER_CORE ROTATION_POOL=20 TRADE_SLOTS=10 TP_DEFAULT=0.33 PAPER_BOT_DEFAULT=150 SOFT=90 HARD=300 AUTO_TOP_MANUAL=1',flush=True)
