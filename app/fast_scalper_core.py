@@ -9,6 +9,7 @@ ROTATION_POOL = 20
 TRADE_SLOTS = 10
 MAX_ENTRY_CANDIDATES = 5
 DEFAULT_PROFIT = 0.33
+DEFAULT_PAPER_BOT = 150.0
 SOFT_TIMEOUT = 90.0
 HARD_TIMEOUT = 300.0
 
@@ -36,30 +37,30 @@ def _indicators(symbol):
 async def radar_core(force=False):
     if not force and legacy.S.get('last_radar') and time.time() - legacy.S['last_radar'] < 5: return
     try:
-        rows = RADAR.snapshot(ROTATION_POOL); ranked = []
+        rows = RADAR.snapshot(ROTATION_POOL); ranked=[]
         for x in rows:
-            s = str(x.get('symbol', '')).upper().replace('/', '')
+            s=str(x.get('symbol','')).upper().replace('/','')
             if not s: continue
-            ind = _indicators(s); c = 0
-            if ind['ready'] and ind['ema9'] >= ind['ema21']: c += 1
-            if ind['ready'] and 45.0 <= ind['rsi'] <= 80.0: c += 1
-            if float(x.get('change_30s_pct', 0) or 0) > 0: c += 1
-            if float(x.get('change_1m_pct', 0) or 0) > 0: c += 1
-            if float(x.get('change_3m_pct', 0) or 0) > 0: c += 1
-            if float(x.get('change_5m_pct', 0) or 0) > -0.50: c += 1
-            if float(x.get('change_15m_pct', 0) or 0) > -1.00: c += 1
-            if float(x.get('volume_ratio', 0) or 0) >= 0.70: c += 1
-            usable = bool(ind['ready'] and c >= 5)
-            score = float(x.get('score', 0) or 0) + c * 4.0 + max(0.0, float(x.get('pump_score', 0) or 0)) * 4.0
-            row = dict(x); row.update({'entry_allowed': usable, 'entry_score': round(score, 2), 'entry_confirmations': c, 'ema9_3m': round(ind['ema9'], 10), 'ema21_3m': round(ind['ema21'], 10), 'rsi14_3m': round(ind['rsi'], 2), 'indicator_tf': ind['tf'], 'candidate_pool': 'TOP-20', 'signal': 'BUY' if usable else 'WATCH'}); ranked.append(row)
-        ranked.sort(key=lambda z: (float(z.get('entry_score', 0)), float(z.get('score', 0))), reverse=True)
-        legacy.S['ranking'] = ranked[:ROTATION_POOL]; legacy.S['last_radar'] = time.time(); legacy.S['error'] = None if not getattr(RADAR, 'last_error', None) else 'Radar WebSocket: ' + RADAR.last_error; refresh_slots()
+            ind=_indicators(s); c=0
+            if ind['ready'] and ind['ema9']>=ind['ema21']: c+=1
+            if ind['ready'] and 45.0<=ind['rsi']<=80.0: c+=1
+            if float(x.get('change_30s_pct',0) or 0)>0: c+=1
+            if float(x.get('change_1m_pct',0) or 0)>0: c+=1
+            if float(x.get('change_3m_pct',0) or 0)>0: c+=1
+            if float(x.get('change_5m_pct',0) or 0)>-0.50: c+=1
+            if float(x.get('change_15m_pct',0) or 0)>-1.00: c+=1
+            if float(x.get('volume_ratio',0) or 0)>=0.70: c+=1
+            usable=bool(ind['ready'] and c>=5)
+            score=float(x.get('score',0) or 0)+c*4.0+max(0.0,float(x.get('pump_score',0) or 0))*4.0
+            row=dict(x); row.update({'entry_allowed':usable,'entry_score':round(score,2),'entry_confirmations':c,'ema9_3m':round(ind['ema9'],10),'ema21_3m':round(ind['ema21'],10),'rsi14_3m':round(ind['rsi'],2),'indicator_tf':ind['tf'],'candidate_pool':'TOP-20','signal':'BUY' if usable else 'WATCH'}); ranked.append(row)
+        ranked.sort(key=lambda z:(float(z.get('entry_score',0)),float(z.get('score',0))),reverse=True)
+        legacy.S['ranking']=ranked[:ROTATION_POOL]; legacy.S['last_radar']=time.time(); legacy.S['error']=None if not getattr(RADAR,'last_error',None) else 'Radar WebSocket: '+RADAR.last_error; refresh_slots()
     except Exception as e:
-        legacy.S['error'] = f'Radar: {type(e).__name__}: {e}'; legacy.S['last_radar'] = time.time()
+        legacy.S['error']=f'Radar: {type(e).__name__}: {e}'; legacy.S['last_radar']=time.time()
 
 def refresh_slots():
     ranked=[]; seen=set()
-    for x in legacy.S.get('ranking', []):
+    for x in legacy.S.get('ranking',[]):
         s=str(x.get('symbol','')).upper().replace('/','')
         if s and s not in seen and re.fullmatch(r'[A-Z0-9]+USDT',s): ranked.append(s); seen.add(s)
     target=ranked[:ROTATION_POOL]; old=(list(legacy.S.get('slots',[]))+[None]*ROTATION_POOL)[:ROTATION_POOL]
@@ -74,12 +75,12 @@ def refresh_slots():
         else: final[i]=None
     legacy.S['slots']=final
 
-legacy.radar = radar_core
-legacy.MAX_AGE = SOFT_TIMEOUT
+legacy.radar=radar_core
+legacy.MAX_AGE=SOFT_TIMEOUT
 
 async def manage_core():
     now=time.time()
-    for p in list(legacy.S.get('positions', [])):
+    for p in list(legacy.S.get('positions',[])):
         try:
             cur=legacy.price(p['symbol']) or p.get('current') or p.get('entry'); p['current']=cur
             entry=float(p.get('entry') or 0); stake=float(p.get('stake') or 0); live=((float(cur)/entry)-1.0)*100.0 if entry else 0.0
@@ -121,20 +122,20 @@ async def engine_core():
 legacy.engine=engine_core
 
 for r in list(legacy.app.router.routes):
-    if getattr(r,'path',None) == '/api/paper/stop' and 'POST' in (getattr(r,'methods',set()) or set()): legacy.app.router.routes.remove(r)
+    if getattr(r,'path',None)=='/api/paper/stop' and 'POST' in (getattr(r,'methods',set()) or set()): legacy.app.router.routes.remove(r)
 @legacy.app.post('/api/paper/stop')
 async def stop_core():
     legacy.S['running']=False; legacy.S['stop_requested']=True; return await legacy.state()
 
 for r in list(legacy.app.router.routes):
-    if getattr(r,'path',None) == '/api/reset' and 'POST' in (getattr(r,'methods',set()) or set()): legacy.app.router.routes.remove(r)
+    if getattr(r,'path',None)=='/api/reset' and 'POST' in (getattr(r,'methods',set()) or set()): legacy.app.router.routes.remove(r)
 @legacy.app.post('/api/reset')
 async def reset_core():
     if legacy.S.get('running'): raise HTTPException(400,'STOP the bot before RESET')
     for p in list(legacy.S.get('positions',[])): await legacy.close(p,'RESET')
     legacy.S['slots']=[None]*ROTATION_POOL; legacy.S['profit']=DEFAULT_PROFIT; legacy.S['reinvest']=True; legacy.S['stop_requested']=None
     legacy.S['session_elapsed']=0.0; legacy.S['session_realized']=0.0; legacy.S['session_trades']=0; legacy.S['session_started']=None; legacy.S['day_started']=None; legacy.S['cycle']=0; legacy.S['last_radar']=0.0; legacy.S['error']=None
-    if legacy.S.get('mode')=='PAPER': legacy.S['account']=legacy.START; legacy.S['bot']=0.0; legacy.S['free']=0.0; legacy.S['reserve']=0.0
+    if legacy.S.get('mode')=='PAPER': legacy.S['account']=legacy.START; legacy.S['bot']=DEFAULT_PAPER_BOT; legacy.S['free']=DEFAULT_PAPER_BOT; legacy.S['reserve']=max(0.0,legacy.S['account']-legacy.S['bot'])
     return await legacy.state()
 
 class SlotsBody(BaseModel):
@@ -160,4 +161,6 @@ async def slots_core(b:SlotsBody):
 
 legacy.S['profit']=DEFAULT_PROFIT
 legacy.S['reinvest']=True
-print('FAST_SCALPER_CORE ROTATION_POOL=20 TRADE_SLOTS=10 TP_DEFAULT=0.33 SOFT=90 HARD=300',flush=True)
+if legacy.S.get('mode')=='PAPER' and float(legacy.S.get('bot') or 0)<=0:
+    legacy.S['bot']=DEFAULT_PAPER_BOT; legacy.S['free']=DEFAULT_PAPER_BOT; legacy.S['reserve']=max(0.0,legacy.S['account']-legacy.S['bot'])
+print('FAST_SCALPER_CORE ROTATION_POOL=20 TRADE_SLOTS=10 TP_DEFAULT=0.33 PAPER_BOT_DEFAULT=150 SOFT=90 HARD=300',flush=True)
