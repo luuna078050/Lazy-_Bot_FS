@@ -47,6 +47,7 @@ async function startBot(){try{await api('/api/paper/start',{method:'POST',body:J
 async function stopBot(){try{await api('/api/paper/stop',{method:'POST'});msg('Bot OFF — new entries stopped');await refresh()}catch(e){msg(e.message)}}
 async function emergency(){try{await api('/api/paper/emergency',{method:'POST'});msg('Emergency stop completed');await refresh()}catch(e){msg(e.message)}}
 async function resetBot(){try{await api('/api/reset',{method:'POST'});msg('Reset completed');await refresh()}catch(e){msg(e.message)}}
+document.addEventListener('click',async e=>{const b=e.target.closest('.pos-close');if(!b)return;try{b.disabled=true;const d=await api('/api/position/close',{method:'POST',body:JSON.stringify({id:b.dataset.closeId,symbol:b.dataset.closeSymbol})});msg('Position closed');await refresh()}catch(err){msg(err.message)}finally{b.disabled=false}});
 refresh();setInterval(refresh,1000);
 </script></body></html>'''
 
