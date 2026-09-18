@@ -7,7 +7,7 @@ from .market_radar import RADAR
 
 ROTATION_POOL = 20
 TRADE_SLOTS = 10
-MAX_ENTRY_CANDIDATES = 5
+MAX_ENTRY_CANDIDATES = 10
 DEFAULT_PROFIT = 0.33
 DEFAULT_PAPER_BOT = 0.0
 SOFT_TIMEOUT = 90.0
@@ -109,6 +109,39 @@ async def open_core(i,symbol):
     await _original_open(i,s)
 legacy.open_pos=open_core
 
+PAPER_MAKER_FEE_RATE=0.001
+PAPER_SLIPPAGE_RATE=0.0005
+
+_original_close_core=legacy.close
+async def close_net_core(p,reason):
+    if legacy.S.get('mode')!='PAPER':
+        return await _original_close_core(p,reason)
+    entry=float(p.get('entry') or 0.0)
+    stake=float(p.get('stake') or 0.0)
+    exit_price=float(legacy.price(p.get('symbol')) or p.get('current') or entry)
+    if entry<=0 or stake<=0:
+        return await _original_close_core(p,reason)
+    effective_entry=entry*(1.0+PAPER_SLIPPAGE_RATE)
+    effective_exit=exit_price*(1.0-PAPER_SLIPPAGE_RATE)
+    qty=stake/effective_entry
+    gross_proceeds=qty*effective_exit
+    entry_fee=stake*PAPER_MAKER_FEE_RATE
+    exit_fee=gross_proceeds*PAPER_MAKER_FEE_RATE
+    net_pnl=gross_proceeds-exit_fee-stake-entry_fee
+    legacy.S['free']+=stake
+    legacy.S['bot']+=net_pnl if legacy.S.get('reinvest') else 0.0
+    legacy.S['account']+=net_pnl if not legacy.S.get('reinvest') else 0.0
+    legacy.refresh_reserve()
+    legacy.S['realized']+=net_pnl
+    legacy.S['session_realized']+=net_pnl
+    legacy.S['session_trades']+=1
+    closed=dict(p,exit=exit_price,pnl=net_pnl,reason=reason,closed_at=legacy.now(),net_pnl=net_pnl,commission=entry_fee+exit_fee)
+    legacy.S['closed'].insert(0,closed);legacy.S['closed']=legacy.S['closed'][:100]
+    legacy.S['orders'].insert(0,{'time':legacy.now(),'symbol':p['symbol'],'side':'SELL','price':exit_price,'pnl':net_pnl,'reason':reason,'commission':entry_fee+exit_fee})
+    if p in legacy.S.get('positions',[]): legacy.S['positions'].remove(p)
+    return closed
+legacy.close=close_net_core
+
 async def engine_core():
     while True:
         try:
@@ -129,6 +162,25 @@ for r in list(legacy.app.router.routes):
 @legacy.app.post('/api/paper/stop')
 async def stop_core():
     legacy.S['running']=False; legacy.S['stop_requested']=True; return await legacy.state()
+
+@legacy.app.post('/api/position/close')
+async def close_position_core(b:dict):
+    ident=str(b.get('id') or '').strip()
+    symbol=str(b.get('symbol') or '').upper().replace('/','').strip()
+    target=None
+    for p in legacy.S.get('positions',[]):
+        if ident and str(p.get('id'))==ident:
+            target=p; break
+        if symbol and str(p.get('symbol','')).upper().replace('/','')==symbol:
+            target=p; break
+    if target is None:
+        raise HTTPException(404,'Open position not found')
+    try:
+        await legacy.close(target,'MANUAL_CLOSE')
+    except Exception as e:
+        legacy.S['error']=f'Close {target.get("symbol")}: {type(e).__name__}: {e}'
+        raise HTTPException(502,legacy.S['error'])
+    return await legacy.state()
 
 for r in list(legacy.app.router.routes):
     if getattr(r,'path',None)=='/api/reset' and 'POST' in (getattr(r,'methods',set()) or set()): legacy.app.router.routes.remove(r)
