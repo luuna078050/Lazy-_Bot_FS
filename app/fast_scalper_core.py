@@ -25,21 +25,6 @@ def _series_indicators(bars):
         k=2.0/(period+1.0); e=vals[0]
         for v in vals[1:]: e=float(v)*k+e*(1.0-k)
         return e
-    diffs=[b-a for a,b in zip(closes[-15:],closes[-14:])]
-    gains=[max(0.0,d) for d in diffs]; losses=[max(0.0,-d) for d in diffs]
-    ag=sum(gains)/14.0; al=sum(losses)/14.0
-    rsi=100.0 if al<=1e-12 and ag>0 else (50.0 if al<=1e-12 else 100.0-100.0/(1.0+ag/al))
-    return {'ready':True,'ema9':ema(9),'ema21':ema(21),'rsi':rsi}
-
-def _series_indicators(bars):
-    closes=[float(x.get('close') or 0) for x in bars if float(x.get('close') or 0)>0]
-    if len(closes)<21:
-        return {'ready':False,'ema9':0.0,'ema21':0.0,'rsi':50.0}
-    vals=closes[-80:]
-    def ema(period):
-        k=2.0/(period+1.0); e=vals[0]
-        for v in vals[1:]: e=float(v)*k+e*(1.0-k)
-        return e
     diffs=[bb-aa for aa,bb in zip(closes[-15:],closes[-14:])]
     gains=[max(0.0,d) for d in diffs]; losses=[max(0.0,-d) for d in diffs]
     ag=sum(gains)/14.0; al=sum(losses)/14.0
@@ -246,7 +231,7 @@ for r in list(legacy.app.router.routes):
 async def reset_core():
     if legacy.S.get('running'): raise HTTPException(400,'STOP the bot before RESET')
     for p in list(legacy.S.get('positions',[])): await legacy.close(p,'RESET')
-    legacy.S['slots']=[None]*ROTATION_POOL; legacy.S['auto_top']=True; legacy.S['profit']=DEFAULT_PROFIT; legacy.S['reinvest']=True; legacy.S['stop_requested']=None
+    legacy.S['slots']=[None]*ROTATION_POOL; legacy.S['auto_top']=True; legacy.S['profit']=DEFAULT_PROFIT; legacy.S['reinvest']=True; legacy.S['pair_cooldown']={}; legacy.S['stop_requested']=None
     legacy.S['session_elapsed']=0.0; legacy.S['session_realized']=0.0; legacy.S['session_trades']=0; legacy.S['session_started']=None; legacy.S['day_started']=None; legacy.S['cycle']=0; legacy.S['last_radar']=0.0; legacy.S['error']=None
     if legacy.S.get('mode')=='PAPER': legacy.S['account']=legacy.START; legacy.S['bot']=DEFAULT_PAPER_BOT; legacy.S['free']=DEFAULT_PAPER_BOT; legacy.S['reserve']=max(0.0,legacy.S['account']-legacy.S['bot'])
     return await legacy.state()
