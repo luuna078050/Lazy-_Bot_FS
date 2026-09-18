@@ -143,7 +143,10 @@ async def open_core(i,symbol):
     s=str(symbol).upper().replace('/','')
     if any(str(p.get('symbol','')).upper().replace('/','')==s for p in legacy.S.get('positions',[])): return
     row=next((x for x in legacy.S.get('ranking',[]) if str(x.get('symbol','')).upper().replace('/','')==s),None)
-    if not row or not bool(row.get('entry_allowed')): return
+    if not row: return
+    # PAPER mode is an executable simulation: selected slots can open from the live radar price while indicators warm up.
+    # BINANCE_TEST retains the confirmed-entry gate.
+    if legacy.S.get('mode') != 'PAPER' and not bool(row.get('entry_allowed')): return
     if float(legacy.S.setdefault('pair_cooldown',{}).get(s,0) or 0)>time.time(): return
     await _original_open(i,s)
 legacy.open_pos=open_core
