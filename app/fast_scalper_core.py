@@ -143,10 +143,12 @@ async def open_core(i,symbol):
     s=str(symbol).upper().replace('/','')
     if any(str(p.get('symbol','')).upper().replace('/','')==s for p in legacy.S.get('positions',[])): return
     row=next((x for x in legacy.S.get('ranking',[]) if str(x.get('symbol','')).upper().replace('/','')==s),None)
-    if not row: return
-    # PAPER mode is an executable simulation: selected slots can open from the live radar price while indicators warm up.
-    # BINANCE_TEST retains the confirmed-entry gate.
-    if legacy.S.get('mode') != 'PAPER' and not bool(row.get('entry_allowed')): return
+    # PAPER mode: a filled TOP-10 slot is an executable order. Do not wait for the
+    # scored ranking/indicator gate; the slot itself is the user's selection.
+    # This lets all 10 selected slots become positions as soon as live ticker prices
+    # are available. BINANCE_TEST keeps the confirmed-entry gate.
+    if legacy.S.get('mode') != 'PAPER':
+        if not row or not bool(row.get('entry_allowed')): return
     if float(legacy.S.setdefault('pair_cooldown',{}).get(s,0) or 0)>time.time(): return
     await _original_open(i,s)
 legacy.open_pos=open_core
@@ -193,11 +195,15 @@ async def engine_core():
         try:
             if legacy.S.get('positions'): await manage_core()
             if legacy.S.get('running') and not legacy.S.get('stop_requested'):
-                await radar_core(False); occupied={int(p.get('slot')) for p in legacy.S.get('positions',[]) if str(p.get('slot','')).lstrip('-').isdigit()}
-                for i,s in enumerate(list(legacy.S.get('slots',[]))[:ROTATION_POOL]):
+                # Entry pass comes first. In PAPER, selected slots must fill from
+                # live ticker prices without waiting for the slower radar/indicator
+                # refresh. With 10 slots this normally completes in one engine tick.
+                occupied={int(p.get('slot')) for p in legacy.S.get('positions',[]) if str(p.get('slot','')).lstrip('-').isdigit()}
+                for i,s in enumerate(list(legacy.S.get('slots',[]))[:TRADE_SLOTS]):
                     if i in occupied or not s: continue
                     await open_core(i,s)
                     if len(legacy.S.get('positions',[]))>=TRADE_SLOTS: break
+                await radar_core(False)
             await asyncio.sleep(1)
         except asyncio.CancelledError: raise
         except Exception as e: legacy.S['error']=f'Engine: {type(e).__name__}: {e}'; await asyncio.sleep(1)
