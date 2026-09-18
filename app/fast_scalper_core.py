@@ -235,6 +235,30 @@ async def engine_core():
 legacy.engine=engine_core
 
 for r in list(legacy.app.router.routes):
+    if getattr(r,'path',None)=='/api/paper/start' and 'POST' in (getattr(r,'methods',set()) or set()): legacy.app.router.routes.remove(r)
+@legacy.app.post('/api/paper/start')
+async def start_core(b: legacy.Start):
+    if legacy.S.get('positions'):
+        raise HTTPException(400,'Close current positions before a new session')
+    if legacy.S.get('mode')=='PAPER':
+        if legacy.S.get('bot',0)<=0:
+            legacy.S['bot']=legacy.S.get('account',legacy.START)
+        legacy.S['free']=max(0.0,float(legacy.S['bot'])-legacy.invested())
+        legacy.S['profit']=float(b.profit_pct)
+        legacy.S['reinvest']=bool(b.reinvest)
+        legacy.S['running']=True
+        legacy.S['stop_requested']=False
+        legacy.S['session_started']=legacy.now()
+        legacy.S['session_elapsed']=0.0
+        legacy.S['session_realized']=0.0
+        legacy.S['session_trades']=0
+        legacy.S['error']=None
+        legacy.S['day_started']=legacy.S.get('day_started') or legacy.now()
+        legacy.refresh_reserve()
+        return await legacy.state()
+    raise HTTPException(403,'Use BINANCE TEST start only through the configured test mode')
+
+for r in list(legacy.app.router.routes):
     if getattr(r,'path',None)=='/api/paper/stop' and 'POST' in (getattr(r,'methods',set()) or set()): legacy.app.router.routes.remove(r)
 @legacy.app.post('/api/paper/stop')
 async def stop_core():
