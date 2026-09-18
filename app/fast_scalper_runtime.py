@@ -169,6 +169,11 @@ async def test_binance():
         await legacy.B.ping()
         acc=await legacy.B.account()
         free_usdt=next((float(x['free']) for x in acc.get('balances',[]) if x.get('asset')=='USDT'),0.0)
+        if not legacy.S.get('running') and not legacy.S.get('positions'):
+            legacy.S['account']=free_usdt
+            legacy.S['bot']=0.0
+            legacy.S['free']=0.0
+            legacy.S['reserve']=free_usdt
         return {'ok':True,'message':'Binance Testnet signed account check OK','testnet':True,'configured':True,'free_usdt':free_usdt,'diagnostics':diag}
     except Exception as e:
         raise HTTPException(400,f'Binance test failed: {type(e).__name__}: {e} | DIAGNOSTICS: {diag}')
