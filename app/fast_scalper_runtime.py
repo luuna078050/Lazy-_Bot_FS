@@ -161,6 +161,17 @@ async def withdraw(b:WithdrawBody):
     if amount>free+1e-9: raise HTTPException(400,f'Withdrawal {amount:.4f} exceeds free bot balance {free:.4f}')
     legacy.S['free']=free-amount;legacy.S['bot']=max(0,float(legacy.S.get('bot',0))-amount);legacy.S['account']=float(legacy.S.get('account',0))+amount;legacy.refresh_reserve();return state_payload()
 
+class SettingsBody(BaseModel):
+    reinvest: bool
+    profit_pct: float = DEFAULT_PROFIT
+
+@legacy.app.post('/api/settings')
+async def settings(b:SettingsBody):
+    if legacy.S.get('running'): raise HTTPException(400,'STOP the bot before changing session settings')
+    legacy.S['reinvest']=bool(b.reinvest)
+    legacy.S['profit']=float(b.profit_pct)
+    return state_payload()
+
 @legacy.app.post('/api/mode')
 async def mode(b:ModeBody):
     m=str(b.mode).upper().strip()
