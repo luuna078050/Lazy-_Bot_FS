@@ -113,23 +113,28 @@ async def manage_core():
             cur=legacy.price(p['symbol']) or p.get('current') or p.get('entry');p['current']=cur
             entry=float(p.get('entry') or 0);stake=float(p.get('stake') or 0)
             live=((float(cur)/entry)-1.0)*100.0 if entry else 0.0
-            p['delta_usdt']=live/100.0*stake;p['age_seconds']=max(0,int(now-float(p.get('opened') or now)));p['age']=p['age_seconds']
+            p['delta_usdt']=live/100.0*stake
+            p['age_seconds']=max(0,int(now-float(p.get('opened') or now)));p['age']=p['age_seconds']
             target=float(legacy.S.get('profit',DEFAULT_PROFIT) or DEFAULT_PROFIT)
             if target>0 and live>=target:
                 await legacy.close(p,'PROFIT_TARGET');continue
-            # Do not call a tiny positive gross move a "good" timeout exit: PAPER fees/slippage consume it.
-            # Soft timeout stays 90s, but only exits at/above the estimated round-trip cost.
             if p['age_seconds']>=SOFT_TIMEOUT and live>=0.30:
                 await legacy.close(p,'TIMEOUT');continue
-            if p in legacy.S.get('posasync def open_core(i,symbol):
+            if p in legacy.S.get('positions',[]) and p['age_seconds']>=HARD_TIMEOUT:
+                await legacy.close(p,'MAX_HOLD')
+        except Exception as e:
+            legacy.S['error']=f'Manage {p.get("symbol")}: {type(e).__name__}: {e}'
+legacy.manage=manage_core
+
+_original_open=legacy.open_pos
+async def open_core(i,symbol):
     if legacy.S.get('stop_requested') or not legacy.S.get('running'): return
     if i>=TRADE_SLOTS or not symbol or len(legacy.S.get('positions',[]))>=TRADE_SLOTS: return
     s=str(symbol).upper().replace('/','')
     if any(str(p.get('symbol','')).upper().replace('/','')==s for p in legacy.S.get('positions',[])): return
     row=next((x for x in legacy.S.get('ranking',[]) if str(x.get('symbol','')).upper().replace('/','')==s),None)
     if not row or not bool(row.get('entry_allowed')): return
-    cooldown=float(legacy.S.setdefault('pair_cooldown',{}).get(s,0) or 0)
-    if cooldown>time.time(): return
+    if float(legacy.S.setdefault('pair_cooldown',{}).get(s,0) or 0)>time.time(): return
     await _original_open(i,s)
 legacy.open_pos=open_core
 
