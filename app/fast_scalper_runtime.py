@@ -160,7 +160,17 @@ async def mode(b:ModeBody):
 
 @legacy.app.post('/api/test-binance')
 async def test_binance():
-    try: await legacy.B.ping();return {'ok':True,'message':'Binance Testnet connection OK' if legacy.B.testnet else 'Binance API connection OK'}
-    except Exception as e: raise HTTPException(400,f'Binance test failed: {type(e).__name__}: {e}')
+    diag=legacy.B.diagnostics()
+    try:
+        if not legacy.B.configured:
+            raise RuntimeError('Binance API credentials are not configured')
+        if not legacy.B.testnet:
+            raise RuntimeError('BINANCE_TEST requires Binance Testnet')
+        await legacy.B.ping()
+        acc=await legacy.B.account()
+        free_usdt=next((float(x['free']) for x in acc.get('balances',[]) if x.get('asset')=='USDT'),0.0)
+        return {'ok':True,'message':'Binance Testnet signed account check OK','testnet':True,'configured':True,'free_usdt':free_usdt,'diagnostics':diag}
+    except Exception as e:
+        raise HTTPException(400,f'Binance test failed: {type(e).__name__}: {e} | DIAGNOSTICS: {diag}')
 
 print('FAST_SCALPER_SINGLE_RUNTIME APPROVED_UI=1 ROTATION_POOL=20 TRADE_SLOTS=10 TP_DEFAULT=0.33 AUTO_TOP=1 SLOT_EDIT=1 RADAR_ROTATION_COLLAPSED=1 LAST_TEN=1',flush=True)
