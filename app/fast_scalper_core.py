@@ -167,6 +167,10 @@ async def close_net_core(p,reason):
     closed=dict(p,exit=exit_price,pnl=net_pnl,reason=reason,closed_at=legacy.now(),net_pnl=net_pnl,commission=entry_fee+exit_fee)
     legacy.S['closed'].insert(0,closed);legacy.S['closed']=legacy.S['closed'][:100]
     legacy.S['orders'].insert(0,{'time':legacy.now(),'symbol':p['symbol'],'side':'SELL','price':exit_price,'pnl':net_pnl,'reason':reason,'commission':entry_fee+exit_fee})
+    sym=str(p.get('symbol','')).upper().replace('/','')
+    if sym and (net_pnl<0 or reason in {'TIMEOUT','MAX_HOLD'}):
+        legacy.S.setdefault('pair_cooldown',{})[sym]=time.time()+180.0
+    print(f"TRADE_CLOSE symbol={sym} reason={reason} pnl={net_pnl:.6f} age={int(p.get('age_seconds',0) or 0)}",flush=True)
     if p in legacy.S.get('positions',[]): legacy.S['positions'].remove(p)
     return closed
 legacy.close=close_net_core
