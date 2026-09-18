@@ -133,7 +133,10 @@ class MarketRadar:
    try:p=float(d.get("c",0) or 0);q=float(d.get("q",0) or 0)
    except (TypeError,ValueError):continue
    if p<=0 or q<MIN_24H_QUOTE:continue
-   m=self._metrics(s,p);score=self._score(d,m)
+   m=self._metrics(s,p)
+   with self.lock: bars3=list(self.bars_3m.get(s,()))
+   m["change_3m_pct"]=self._change(bars3,1) if len(bars3)>=2 else (m["change_2m_pct"]+m["change_1m_pct"])
+   score=self._score(d,m)
    if q<1_000_000:continue
    if m["risk_pct"]>2.5 and m["change_1m_pct"]<.5:continue
    rows.append((s,d,m,score))
@@ -143,7 +146,7 @@ class MarketRadar:
   out=[]
   for s,d,m,score in final:
    p=float(d.get("c",0) or 0);sig="BUY" if m["change_1m_pct"]>0 and m["change_2m_pct"]>0 else ("WATCH" if m["change_1m_pct"]>0 else "WAIT");target=min(.012,max(.0035,abs(m["change_2m_pct"])/100*.8))
-   out.append({"symbol":s[:-4]+"/USDT","price":p,"change_24h_pct":round((p/float(d.get("o",p) or p)-1)*100,3),"quote_volume_24h":float(d.get("q",0) or 0),"score":round(score,2),"signal":sig,"estimated_entry":p,"estimated_exit":p*(1+target),"estimated_stop":p*(1-.004),"change_1m_pct":round(m["change_1m_pct"],4),"change_2m_pct":round(m["change_2m_pct"],4),"change_4m_pct":round(m["change_4m_pct"],4),"change_3m_pct":round(m["change_2m_pct"]+m["change_1m_pct"],4),"risk_pct":round(m["risk_pct"],4),"volume_ratio":round(m["volume_ratio"],2),"buy_ratio":round(m["buy_ratio"],4),"pump_events":0,"pump_score":round(self._pulse_score(m),3),"hold_seconds":180})
+   out.append({"symbol":s[:-4]+"/USDT","price":p,"change_24h_pct":round((p/float(d.get("o",p) or p)-1)*100,3),"quote_volume_24h":float(d.get("q",0) or 0),"score":round(score,2),"signal":sig,"estimated_entry":p,"estimated_exit":p*(1+target),"estimated_stop":p*(1-.004),"change_1m_pct":round(m["change_1m_pct"],4),"change_2m_pct":round(m["change_2m_pct"],4),"change_4m_pct":round(m["change_4m_pct"],4),"change_3m_pct":round(m["change_3m_pct"],4),"risk_pct":round(m["risk_pct"],4),"volume_ratio":round(m["volume_ratio"],2),"buy_ratio":round(m["buy_ratio"],4),"pump_events":0,"pump_score":round(self._pulse_score(m),3),"hold_seconds":180})
   self.last_snapshot=time.time();return out[:max(1,int(limit))]
  def price(self,symbol):
   s=symbol.upper().replace('/','')
