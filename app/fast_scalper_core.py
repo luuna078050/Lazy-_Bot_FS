@@ -165,19 +165,13 @@ async def open_core(i,symbol):
     if i>=TRADE_SLOTS or not symbol or len(legacy.S.get('positions',[]))>=TRADE_SLOTS: return
     s=str(symbol).upper().replace('/','')
     if any(str(p.get('symbol','')).upper().replace('/','')==s for p in legacy.S.get('positions',[])): return
-    row=next((x for x in legacy.S.get('ranking',[]) if str(x.get('symbol','')).upper().replace('/','')==s),None)
-    # PAPER mode: a filled TOP-10 slot is an executable order. Do not wait for the
-    # scored ranking/indicator gate; the slot itself is the user's selection.
-    # This lets all 10 selected slots become positions as soon as live ticker prices
-    # are available. BINANCE_TEST keeps the confirmed-entry gate.
-    if legacy.S.get('mode') != 'PAPER':
-        if not row or not bool(row.get('entry_allowed')): return
-    # PAPER execution is slot-driven: a non-empty slot is an order instruction.
-    # Do not block a selected slot because of the radar score or pair cooldown.
-    if legacy.S.get('mode')=='PAPER':
+    # HARD RULE: an occupied execution slot is an order instruction in BOTH
+    # PAPER and BINANCE_TEST. Radar ranking/entry confirmation is used to build
+    # AUTO TOP-10, but it must never veto an already occupied slot.
+    # The user can therefore fill slots from TOP-20 (or manually), press BOT ON,
+    # and the occupied slots are sent to the selected execution mode.
+    if legacy.S.get('mode') in {'PAPER','BINANCE_TEST'}:
         legacy.S.setdefault('pair_cooldown',{}).pop(s,None)
-    else:
-        if float(legacy.S.setdefault('pair_cooldown',{}).get(s,0) or 0)>time.time(): return
     await _original_open(i,s)
 legacy.open_pos=open_core
 
