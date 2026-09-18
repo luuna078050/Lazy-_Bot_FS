@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio, re, time
+import httpx
 from fastapi import HTTPException
 from pydantic import BaseModel
 from . import fast_scalper_beta_001_legacy as legacy
@@ -137,6 +138,28 @@ async def manage_core():
 legacy.manage=manage_core
 
 _original_open=legacy.open_pos
+async def refresh_paper_prices(symbols):
+    """Refresh selected PAPER slot prices from Binance public market data in one request."""
+    symbols=[str(x).upper().replace('/','') for x in symbols if x]
+    if not symbols or legacy.S.get('mode')!='PAPER': return
+    try:
+        async with httpx.AsyncClient(timeout=2.5) as client:
+            r=await client.get('https://data-api.binance.vision/api/v3/ticker/price')
+            r.raise_for_status()
+            data=r.json()
+        wanted=set(symbols)
+        with RADAR.lock:
+            for row in data if isinstance(data,list) else []:
+                s=str(row.get('symbol','')).upper()
+                if s in wanted:
+                    try:
+                        p=float(row.get('price') or 0)
+                    except (TypeError,ValueError):
+                        continue
+                    if p>0: RADAR.tickers[s]={'s':s,'c':str(p)}
+    except Exception as e:
+        legacy.S['error']=f'Paper price feed: {type(e).__name__}: {e}'
+
 async def open_core(i,symbol):
     if legacy.S.get('stop_requested') or not legacy.S.get('running'): return
     if i>=TRADE_SLOTS or not symbol or len(legacy.S.get('positions',[]))>=TRADE_SLOTS: return
@@ -198,8 +221,10 @@ async def engine_core():
                 # Entry pass comes first. In PAPER, selected slots must fill from
                 # live ticker prices without waiting for the slower radar/indicator
                 # refresh. With 10 slots this normally completes in one engine tick.
+                selected=list(legacy.S.get('slots',[]))[:TRADE_SLOTS]
+                await refresh_paper_prices(selected)
                 occupied={int(p.get('slot')) for p in legacy.S.get('positions',[]) if str(p.get('slot','')).lstrip('-').isdigit()}
-                for i,s in enumerate(list(legacy.S.get('slots',[]))[:TRADE_SLOTS]):
+                for i,s in enumerate(selected):
                     if i in occupied or not s: continue
                     await open_core(i,s)
                     if len(legacy.S.get('positions',[]))>=TRADE_SLOTS: break
