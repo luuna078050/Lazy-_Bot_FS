@@ -226,8 +226,11 @@ async def engine_core():
                 # Entry pass comes first. In PAPER, selected slots must fill from
                 # live ticker prices without waiting for the slower radar/indicator
                 # refresh. With 10 slots this normally completes in one engine tick.
-                # HARD RULE: first 10 non-empty slots are the trade queue.
-                # If slot 01..10 contains a pair, that pair gets an order attempt.
+                # HARD RULE: Radar TOP-20 owns the slot queue when AUTO TOP-10 is ON.
+                # The first 10 ranked pairs are written into slots 01..10 before execution.
+                # When AUTO is OFF, only the manually occupied slots are executable.
+                if legacy.S.get('auto_top', True):
+                    refresh_slots()
                 selected=list(legacy.S.get('slots',[]))[:TRADE_SLOTS]
                 selected=[str(s).upper().replace('/','').strip() if s else None for s in selected]
                 await refresh_paper_prices(selected)
