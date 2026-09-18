@@ -172,7 +172,12 @@ async def open_core(i,symbol):
     # are available. BINANCE_TEST keeps the confirmed-entry gate.
     if legacy.S.get('mode') != 'PAPER':
         if not row or not bool(row.get('entry_allowed')): return
-    if float(legacy.S.setdefault('pair_cooldown',{}).get(s,0) or 0)>time.time(): return
+    # PAPER execution is slot-driven: a non-empty slot is an order instruction.
+    # Do not block a selected slot because of the radar score or pair cooldown.
+    if legacy.S.get('mode')=='PAPER':
+        legacy.S.setdefault('pair_cooldown',{}).pop(s,None)
+    else:
+        if float(legacy.S.setdefault('pair_cooldown',{}).get(s,0) or 0)>time.time(): return
     await _original_open(i,s)
 legacy.open_pos=open_core
 
@@ -221,13 +226,25 @@ async def engine_core():
                 # Entry pass comes first. In PAPER, selected slots must fill from
                 # live ticker prices without waiting for the slower radar/indicator
                 # refresh. With 10 slots this normally completes in one engine tick.
+                # HARD RULE: first 10 non-empty slots are the trade queue.
+                # If slot 01..10 contains a pair, that pair gets an order attempt.
                 selected=list(legacy.S.get('slots',[]))[:TRADE_SLOTS]
+                selected=[str(s).upper().replace('/','').strip() if s else None for s in selected]
                 await refresh_paper_prices(selected)
                 occupied={int(p.get('slot')) for p in legacy.S.get('positions',[]) if str(p.get('slot','')).lstrip('-').isdigit()}
                 for i,s in enumerate(selected):
-                    if i in occupied or not s: continue
+                    if i in occupied or not s:
+                        continue
+                    print(f"OPEN_SLOT_ATTEMPT slot={i+1} symbol={s} mode={legacy.S.get('mode')} free={float(legacy.S.get('free',0) or 0):.6f}",flush=True)
+                    before=len(legacy.S.get('positions',[]))
                     await open_core(i,s)
-                    if len(legacy.S.get('positions',[]))>=TRADE_SLOTS: break
+                    after=len(legacy.S.get('positions',[]))
+                    if after>before:
+                        print(f"OPEN_SLOT_FILLED slot={i+1} symbol={s} positions={after}",flush=True)
+                    elif legacy.S.get('error'):
+                        print(f"OPEN_SLOT_BLOCKED slot={i+1} symbol={s} error={legacy.S.get('error')}",flush=True)
+                    if after>=TRADE_SLOTS:
+                        break
                 await radar_core(False)
             await asyncio.sleep(1)
         except asyncio.CancelledError: raise
