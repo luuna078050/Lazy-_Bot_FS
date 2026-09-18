@@ -19,9 +19,9 @@ def _indicators(symbol):
     s = str(symbol).upper().replace('/', '')
     with RADAR.lock:
         by_tf = {tf: list(RADAR.bars.get(s, {}).get(tf, ())) for tf in ('3m', '1m')}
-    tf = '3m' if len(by_tf['3m']) >= 22 else '1m'
-    closes = [float(x.get('close') or 0) for x in by_tf[tf] if float(x.get('close') or 0) > 0]
-    if len(closes) < 22:
+    tf = '1m'
+    closes = [float(x.get('close') or 0) for x in by_tf['1m'] if float(x.get('close') or 0) > 0]
+    if len(closes) < 15:
         return {'ready': False, 'tf': tf, 'ema9': 0.0, 'ema21': 0.0, 'rsi': 50.0}
     vals = closes[-60:]
     def ema(period):
@@ -44,7 +44,7 @@ async def radar_core(force=False):
             if not s: continue
             ind=_indicators(s); c=0
             if ind['ready'] and ind['ema9']>=ind['ema21']: c+=1
-            if ind['ready'] and 45.0<=ind['rsi']<=80.0: c+=1
+            if ind['ready'] and 40.0<=ind['rsi']<=80.0: c+=1
             if float(x.get('change_30s_pct',0) or 0)>0: c+=1
             if float(x.get('change_1m_pct',0) or 0)>0: c+=1
             if float(x.get('change_3m_pct',0) or 0)>0: c+=1
