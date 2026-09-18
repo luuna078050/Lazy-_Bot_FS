@@ -174,3 +174,4 @@ async def test_binance():
         raise HTTPException(400,f'Binance test failed: {type(e).__name__}: {e} | DIAGNOSTICS: {diag}')
 
 print('FAST_SCALPER_SINGLE_RUNTIME APPROVED_UI=1 ROTATION_POOL=20 TRADE_SLOTS=10 TP_DEFAULT=0.33 AUTO_TOP=1 SLOT_EDIT=1 RADAR_ROTATION_COLLAPSED=1 LAST_TEN=1',flush=True)
+print(f'BINANCE_CONFIGURED={legacy.B.configured} BINANCE_TESTNET={legacy.B.testnet} LIVE_ENABLED={legacy.B.live}',flush=True)
