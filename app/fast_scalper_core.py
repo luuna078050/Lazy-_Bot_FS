@@ -102,8 +102,8 @@ async def open_core(i,symbol):
     s=str(symbol).upper().replace('/','')
     if any(str(p.get('symbol','')).upper().replace('/','')==s for p in legacy.S.get('positions',[])): return
     row=next((x for x in legacy.S.get('ranking',[]) if str(x.get('symbol','')).upper().replace('/','')==s),None)
-    if not row or not row.get('entry_allowed'): return
-    confirmed=[x for x in legacy.S.get('ranking',[]) if x.get('entry_allowed')]; confirmed.sort(key=lambda x:float(x.get('entry_score',0) or 0),reverse=True)
+    if not row: return
+    confirmed=list(legacy.S.get('ranking',[])); confirmed.sort(key=lambda x:float(x.get('entry_score',x.get('score',0)) or 0),reverse=True)
     leaders={str(x.get('symbol','')).upper().replace('/','') for x in confirmed[:MAX_ENTRY_CANDIDATES]}
     if s not in leaders: return
     await _original_open(i,s)
