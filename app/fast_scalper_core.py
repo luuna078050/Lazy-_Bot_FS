@@ -9,7 +9,7 @@ ROTATION_POOL = 20
 TRADE_SLOTS = 10
 MAX_ENTRY_CANDIDATES = 5
 DEFAULT_PROFIT = 0.33
-DEFAULT_PAPER_BOT = 150.0
+DEFAULT_PAPER_BOT = 0.0
 SOFT_TIMEOUT = 90.0
 HARD_TIMEOUT = 300.0
 
@@ -177,6 +177,4 @@ async def auto_top_core(b:AutoTopBody):
 
 legacy.S['profit']=DEFAULT_PROFIT
 legacy.S['reinvest']=True
-if legacy.S.get('mode')=='PAPER' and float(legacy.S.get('bot') or 0)<=0:
-    legacy.S['bot']=DEFAULT_PAPER_BOT; legacy.S['free']=DEFAULT_PAPER_BOT; legacy.S['reserve']=max(0.0,legacy.S['account']-legacy.S['bot'])
 print('FAST_SCALPER_CORE ROTATION_POOL=20 TRADE_SLOTS=10 TP_DEFAULT=0.33 PAPER_BOT_DEFAULT=150 SOFT=90 HARD=300 AUTO_TOP_MANUAL=1',flush=True)
