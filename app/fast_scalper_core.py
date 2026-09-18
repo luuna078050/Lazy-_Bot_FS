@@ -31,6 +31,21 @@ def _series_indicators(bars):
     rsi=100.0 if al<=1e-12 and ag>0 else (50.0 if al<=1e-12 else 100.0-100.0/(1.0+ag/al))
     return {'ready':True,'ema9':ema(9),'ema21':ema(21),'rsi':rsi}
 
+def _series_indicators(bars):
+    closes=[float(x.get('close') or 0) for x in bars if float(x.get('close') or 0)>0]
+    if len(closes)<21:
+        return {'ready':False,'ema9':0.0,'ema21':0.0,'rsi':50.0}
+    vals=closes[-80:]
+    def ema(period):
+        k=2.0/(period+1.0); e=vals[0]
+        for v in vals[1:]: e=float(v)*k+e*(1.0-k)
+        return e
+    diffs=[bb-aa for aa,bb in zip(closes[-15:],closes[-14:])]
+    gains=[max(0.0,d) for d in diffs]; losses=[max(0.0,-d) for d in diffs]
+    ag=sum(gains)/14.0; al=sum(losses)/14.0
+    rsi=100.0 if al<=1e-12 and ag>0 else (50.0 if al<=1e-12 else 100.0-100.0/(1.0+ag/al))
+    return {'ready':True,'ema9':ema(9),'ema21':ema(21),'rsi':rsi}
+
 def _indicators(symbol):
     s=str(symbol).upper().replace('/','')
     with RADAR.lock:
@@ -38,7 +53,17 @@ def _indicators(symbol):
         bars3=list(getattr(RADAR,'bars_3m',{}).get(s,()))
     i1=_series_indicators(bars1)
     i3=_series_indicators(bars3)
-    if not i3['async def radar_core(force=False):
+    if not i3['ready']:
+        return {'ready':False,'ready_1m':i1['ready'],'tf':'3m','ema9':0.0,'ema21':0.0,'rsi':50.0,
+                'ema9_1m':i1['ema9'],'ema21_1m':i1['ema21'],'rsi_1m':i1['rsi'],'volume_ratio_3m':0.0}
+    vols=[max(0.0,float(x.get('quote_volume') or 0)) for x in bars3[-21:]]
+    base=sum(vols[:-1])/max(1,len(vols[:-1])) if len(vols)>=4 else 0.0
+    vr=vols[-1]/base if base>0 and vols else 0.0
+    return {'ready':True,'ready_1m':i1['ready'],'tf':'3m','ema9':i3['ema9'],'ema21':i3['ema21'],
+            'rsi':i3['rsi'],'ema9_1m':i1['ema9'],'ema21_1m':i1['ema21'],'rsi_1m':i1['rsi'],
+            'volume_ratio_3m':vr}
+
+async def radar_core(force=False):
     if not force and legacy.S.get('last_radar') and time.time()-legacy.S['last_radar']<5: return
     try:
         rows=RADAR.snapshot(ROTATION_POOL); ranked=[]
