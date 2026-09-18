@@ -256,7 +256,38 @@ async def start_core(b: legacy.Start):
         legacy.S['day_started']=legacy.S.get('day_started') or legacy.now()
         legacy.refresh_reserve()
         return await legacy.state()
-    raise HTTPException(403,'Use BINANCE TEST start only through the configured test mode')
+    if legacy.S.get('mode')=='BINANCE_TEST':
+        if not legacy.B.configured:
+            raise HTTPException(400,'Binance API credentials are not configured')
+        if not legacy.B.testnet:
+            raise HTTPException(403,'BINANCE_TEST requires Binance Testnet')
+        if float(legacy.S.get('bot',0) or 0)<=0:
+            raise HTTPException(400,'Set Bot Allocation before starting BINANCE_TEST')
+        try:
+            await legacy.B.ping()
+            acc=await legacy.B.account()
+            free_usdt=next((float(x.get('free') or 0) for x in acc.get('balances',[]) if x.get('asset')=='USDT'),0.0)
+            if free_usdt<float(legacy.S['bot']):
+                raise RuntimeError(f"Bot allocation {legacy.S['bot']:.8f} exceeds free USDT {free_usdt:.8f}")
+            legacy.S['account']=free_usdt+legacy.invested()
+            legacy.S['free']=max(0.0,float(legacy.S['bot'])-legacy.invested())
+            legacy.S['profit']=float(b.profit_pct)
+            legacy.S['reinvest']=bool(b.reinvest)
+            legacy.S['running']=True
+            legacy.S['stop_requested']=False
+            legacy.S['session_started']=legacy.now()
+            legacy.S['session_elapsed']=0.0
+            legacy.S['session_realized']=0.0
+            legacy.S['session_trades']=0
+            legacy.S['error']=None
+            legacy.S['day_started']=legacy.S.get('day_started') or legacy.now()
+            legacy.refresh_reserve()
+            return await legacy.state()
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(400,f'Binance TEST start failed: {type(e).__name__}: {e}')
+    raise HTTPException(403,'Unsupported trading mode')
 
 for r in list(legacy.app.router.routes):
     if getattr(r,'path',None)=='/api/paper/stop' and 'POST' in (getattr(r,'methods',set()) or set()): legacy.app.router.routes.remove(r)
