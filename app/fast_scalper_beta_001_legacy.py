@@ -92,7 +92,8 @@ async def close(p,reason):
     if ca=='USDT': sell_fee_usdt += comm
     elif ca==str(p.get('symbol','')).upper().replace('/','')[:-4]: sell_fee_usdt += comm*fp
    except (TypeError,ValueError): pass
-  pnl=proceeds-sell_fee_usdt-float(p['stake'])-buy_fee_usdt
+  cost_basis=float(p.get('cost_usdt') or p.get('stake') or 0.0)
+  pnl=proceeds-sell_fee_usdt-cost_basis-buy_fee_usdt
   S['free']+=proceeds-sell_fee_usdt
   if S['reinvest']:
    S['bot']+=pnl
@@ -100,7 +101,7 @@ async def close(p,reason):
    S['account']+=pnl
    S['free']=max(0.0,S['bot']-invested())
   refresh_reserve()
-  S['orders'].insert(0,{'time':now(),'symbol':p['symbol'],'side':'SELL','status':status,'price':xp,'qty':p['qty'],'order_id':r.get('orderId'),'pnl':pnl,'reason':reason})
+  S['orders'].insert(0,{'time':now(),'symbol':p['symbol'],'side':'SELL','status':status,'price':xp,'qty':p['qty'],'stake':float(p.get('stake') or 0.0),'cost_usdt':cost_basis,'order_id':r.get('orderId'),'pnl':pnl,'reason':reason})
  else:
   ep=p['entry'];xp=price(p['symbol']) or ep;pnl=(xp/ep-1)*p['stake'];S['free']+=p['stake'];S['bot']+=pnl if S['reinvest'] else 0;S['account']+=pnl if not S['reinvest'] else 0;refresh_reserve();S['orders'].insert(0,{'time':now(),'symbol':p['symbol'],'side':'SELL','price':xp,'pnl':pnl,'reason':reason})
  S['realized']+=pnl;S['session_realized']+=pnl;S['session_trades']+=1;S['closed'].insert(0,dict(p,exit=xp,pnl=pnl,reason=reason,closed_at=now()));S['closed']=S['closed'][:100];S['positions'].remove(p)
@@ -128,8 +129,20 @@ async def open_pos(i,s):
      if ca=='USDT': buy_fee_usdt += comm
      elif ca==s[:-4]: buy_fee_usdt += comm*fp
     except (TypeError,ValueError): pass
-   ep=spent/qty;S['free']-=spent;p={'id':f"B{r.get('orderId',int(time.time()*1000))}",'slot':i,'symbol':s,'tf':TF,'entry':ep,'current':ep,'stake':spent,'qty':qty,'buy_fee_usdt':buy_fee_usdt,'qty_received':qty,'opened':time.time(),'opened_at':now(),'order_id':r.get('orderId')};S['positions'].append(p);S['orders'].insert(0,{'time':now(),'symbol':s,'side':'BUY','status':status,'price':ep,'qty':qty,'stake':spent,'order_id':r.get('orderId'),'slot':i})
-  except Exception as e:S['error']=f'Binance BUY {s}: {type(e).__name__}: {e}'
+   ep=spent/qty;S['free']-=spent
+   # Keep the configured equal-slot allocation visible (e.g. 200/10 = 20 USDT)
+   # while retaining the actual executed quote cost separately for accounting.
+   target_stake=float(S.get('bot',0) or 0)/10.0
+   p={'id':f"B{r.get('orderId',int(time.time()*1000))}",'slot':i,'symbol':s,'tf':TF,
+      'entry':ep,'current':ep,'stake':target_stake,'cost_usdt':spent,'qty':qty,
+      'buy_fee_usdt':buy_fee_usdt,'qty_received':qty,'opened':time.time(),
+      'opened_at':now(),'order_id':r.get('orderId')}
+   S['positions'].append(p);S['orders'].insert(0,{'time':now(),'symbol':s,'side':'BUY',
+      'status':status,'price':ep,'qty':qty,'stake':target_stake,'cost_usdt':spent,
+      'order_id':r.get('orderId'),'slot':i})
+  except Exception as e:
+   S.setdefault('pair_cooldown',{})[s]=time.time()+60.0
+   S['error']=f'Binance BUY {s}: {type(e).__name__}: {e}'
   return
  if S['free']<=0:return
  ep=price(s)
