@@ -95,8 +95,11 @@ async def open_pos(i,s):
  if not n:return
  if S['mode']=='BINANCE_TEST':
   if S['free']<=0:return
-  stake=min(S['free'],S['bot']/n)
-  if stake<=0:return
+  # 10 execution slots = 10 equal allocations. With a 150 USDT bot
+  # balance every slot must use 15 USDT, not 7.50 or a shrinking half-size.
+  target_stake=float(S.get('bot',0) or 0)/10.0
+  if target_stake<=0 or S['free']+1e-9<target_stake:return
+  stake=target_stake
   try:
    r=await B.market_buy(s,stake);status=r.get('status','')
    if status!='FILLED':raise RuntimeError(f'Binance BUY not filled: {status or r}')
@@ -108,7 +111,9 @@ async def open_pos(i,s):
  if S['free']<=0:return
  ep=price(s)
  if ep<=0:return
- stake=min(S['free'],max(1.0,S['bot']/n));S['free']-=stake;p={'id':f'P{int(time.time()*1000)}','slot':i,'symbol':s,'tf':TF,'entry':ep,'current':ep,'stake':stake,'opened':time.time(),'opened_at':now()};S['positions'].append(p);S['orders'].insert(0,{'time':now(),'symbol':s,'side':'BUY','status':'PAPER_FILLED','price':ep,'slot':i})
+ target_stake=float(S.get('bot',0) or 0)/10.0
+ if target_stake<=0 or S['free']+1e-9<target_stake:return
+ stake=target_stake;S['free']-=stake;p={'id':f'P{int(time.time()*1000)}','slot':i,'symbol':s,'tf':TF,'entry':ep,'current':ep,'stake':stake,'opened':time.time(),'opened_at':now()};S['positions'].append(p);S['orders'].insert(0,{'time':now(),'symbol':s,'side':'BUY','status':'PAPER_FILLED','price':ep,'slot':i})
 async def manage():
  for p in list(S['positions']):
   p['current']=price(p['symbol']) or p['current'];live=(p['current']/p['entry']-1)*100
