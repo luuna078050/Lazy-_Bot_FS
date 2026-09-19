@@ -9,9 +9,10 @@ from .market_radar import RADAR
 ROTATION_POOL = 20
 TRADE_SLOTS = 10
 MAX_ENTRY_CANDIDATES = 10
-DEFAULT_PROFIT = 0.45
+DEFAULT_PROFIT = 0.33
 DEFAULT_PAPER_BOT = 0.0
 SOFT_TIMEOUT = 90.0
+ROTATION_SECONDS = 60.0
 HARD_TIMEOUT = 300.0
 
 # Scalp economics: the target must cover the modeled round-trip costs and
@@ -166,20 +167,40 @@ async def manage_core():
     now=time.time()
     for p in list(legacy.S.get('positions',[])):
         try:
-            cur=await _execution_price(p['symbol']) or p.get('current') or p.get('entry');p['current']=cur
-            entry=float(p.get('entry') or 0);stake=float(p.get('stake') or 0)
+            cur=await _execution_price(p['symbol']) or p.get('current') or p.get('entry')
+            p['current']=cur
+            entry=float(p.get('entry') or 0.0)
+            stake=float(p.get('stake') or 0.0)
             live=((float(cur)/entry)-1.0)*100.0 if entry else 0.0
             p['delta_usdt']=live/100.0*stake
-            p['age_seconds']=max(0,int(now-float(p.get('opened') or now)));p['age']=p['age_seconds']
-            target=float(p.get('target_pct') or _required_target_pct(stake))
+            p['age_seconds']=max(0,int(now-float(p.get('opened') or now)))
+            p['age']=p['age_seconds']
+
+            # Keep the user-selected target semantics from the v0.4.2
+            # baseline, but protect it with the modeled round-trip cost and
+            # minimum net-profit requirement. Do NOT add an arbitrary extra
+            # 0.25 percentage-point buffer: that made normal 0.33% targets
+            # effectively unreachable on small slots.
+            configured=float(p.get('target_pct') or legacy.S.get('profit') or DEFAULT_PROFIT)
+            target=max(configured, MODEL_ROUNDTRIP_COST_PCT + (MIN_NET_PROFIT_USDT/max(0.01,stake))*100.0)
             modeled_net=stake*(live/100.0-MODEL_ROUNDTRIP_COST_PCT/100.0)
-            # Require both the target percentage and a positive modeled net
-            # cushion before sending a market SELL. This prevents a stale
-            # radar quote from turning a PROFIT_TARGET into a losing fill.
-            if target>0 and live>=target+0.25 and modeled_net>=MIN_NET_PROFIT_USDT:
-                await legacy.close(p,'PROFIT_TARGET');continue
-            # Do not force a tiny +0.30% exit after 90 seconds. The position
-            # gets the full scalp window and is force-closed only at 5 minutes.
+
+            # Baseline PROFIT_TARGET, protected: it may only close when the
+            # expected net remains positive after modeled costs.
+            if target>0 and live>=target and modeled_net>=MIN_NET_PROFIT_USDT:
+                await legacy.close(p,'PROFIT_TARGET')
+                continue
+
+            # Baseline ROTATION: after 60 seconds allow a profitable rotation,
+            # but never force a loss merely because the rotation clock expired.
+            if (p in legacy.S.get('positions',[]) and
+                p['age_seconds']>=ROTATION_SECONDS and
+                modeled_net>=MIN_NET_PROFIT_USDT):
+                await legacy.close(p,'ROTATION')
+                continue
+
+            # Absolute time guard. This is the only automatic path that may
+            # realize a negative PnL; it is a hard hold limit, not a target.
             if p in legacy.S.get('positions',[]) and p['age_seconds']>=HARD_TIMEOUT:
                 await legacy.close(p,'MAX_HOLD')
         except Exception as e:
@@ -443,4 +464,4 @@ async def auto_top_core(b:AutoTopBody):
 
 legacy.S['profit']=DEFAULT_PROFIT
 legacy.S['reinvest']=True
-print('FAST_SCALPER_CORE ROTATION_POOL=20 TRADE_SLOTS=10 TP_DEFAULT=0.45 MIN_NET=0.02 COST=0.30 MIN_MOVE=0.45 HARD=300 ENTRY=SCALP_FILTER COOLDOWN=180',flush=True)
+print('FAST_SCALPER_CORE BASELINE=2026-09-06T17:44+02:00 ROTATION_POOL=20 TRADE_SLOTS=10 TP_DEFAULT=0.33 ROTATION=60 MIN_NET=0.02 COST=0.30 MIN_MOVE=0.45 HARD=300 ENTRY=SCALP_FILTER COOLDOWN=180 SPOT_ONLY=1',flush=True)
