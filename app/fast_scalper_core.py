@@ -148,22 +148,32 @@ def refresh_slots():
 legacy.radar=radar_core
 legacy.MAX_AGE=SOFT_TIMEOUT
 
-async def _execution_price(symbol):
-    s=str(symbol).upper().replace('/','')
-    # For BINANCE_TEST use the execution venue's own ticker immediately before
-    # a target decision; the radar stream can lag the actual fill price.
-    if legacy.S.get('mode')=='BINANCE_TEST':
-        try:
-            async with httpx.AsyncClient(timeout=1.5) as client:
-                r=await client.get(f"{legacy.B.base}/v3/ticker/price",params={'symbol':s})
-                r.raise_for_status()
-                px=float((r.json() or {}).get('price') or 0)
-                if px>0: return px
-        except Exception:
-            pass
-    return float(legacy.price(s) or 0)
+async def refresh_binance_test_prices(symbols):
+    """Refresh all open BINANCE_TEST prices with one public request per engine tick."""
+    if legacy.S.get('mode')!='BINANCE_TEST': return
+    wanted={str(x).upper().replace('/','') for x in symbols if x}
+    if not wanted: return
+    try:
+        async with httpx.AsyncClient(timeout=2.5) as client:
+            r=await client.get(f"{legacy.B.base}/v3/ticker/price")
+            r.raise_for_status()
+            data=r.json()
+        with RADAR.lock:
+            for row in data if isinstance(data,list) else []:
+                s=str(row.get('symbol','')).upper()
+                if s not in wanted: continue
+                try: px=float(row.get('price') or 0)
+                except (TypeError,ValueError): continue
+                if px>0: RADAR.tickers[s]={'s':s,'c':str(px)}
+    except Exception as e:
+        legacy.S['error']=f'Binance price feed: {type(e).__name__}: {e}'
+
+def _execution_price(symbol):
+    return float(legacy.price(symbol) or 0)
 
 async def manage_core():
+    await refresh_binance_test_prices([p.get('symbol') for p in legacy.S.get('positions',[])])
+
     now=time.time()
     for p in list(legacy.S.get('positions',[])):
         try:
