@@ -91,7 +91,7 @@ async def close(p,reason):
  S['realized']+=pnl;S['session_realized']+=pnl;S['session_trades']+=1;S['closed'].insert(0,dict(p,exit=xp,pnl=pnl,reason=reason,closed_at=now()));S['closed']=S['closed'][:100];S['positions'].remove(p)
 async def open_pos(i,s):
  if not s:return
- n=sum(1 for x in S['slots'] if x)
+ n=sum(1 for x in S['slots'][:10] if x)
  if not n:return
  if S['mode']=='BINANCE_TEST':
   if S['free']<=0:return
