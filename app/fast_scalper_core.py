@@ -9,10 +9,16 @@ from .market_radar import RADAR
 ROTATION_POOL = 20
 TRADE_SLOTS = 10
 MAX_ENTRY_CANDIDATES = 10
-DEFAULT_PROFIT = 0.33
+DEFAULT_PROFIT = 0.45
 DEFAULT_PAPER_BOT = 0.0
 SOFT_TIMEOUT = 90.0
 HARD_TIMEOUT = 300.0
+
+# Scalp economics: the target must cover the modeled round-trip costs and
+# leave at least 0.02 USDT net on a small (~15 USDT) position.
+MIN_NET_PROFIT_USDT = 0.02
+MODEL_ROUNDTRIP_COST_PCT = 0.30
+MIN_SCALP_MOVE_PCT = 0.45
 
 legacy.S['auto_top'] = True
 legacy.S.setdefault('pair_cooldown',{})
@@ -31,6 +37,26 @@ def _series_indicators(bars):
     ag=sum(gains)/14.0; al=sum(losses)/14.0
     rsi=100.0 if al<=1e-12 and ag>0 else (50.0 if al<=1e-12 else 100.0-100.0/(1.0+ag/al))
     return {'ready':True,'ema9':ema(9),'ema21':ema(21),'rsi':rsi}
+
+def _required_target_pct(stake):
+    stake=max(0.01,float(stake or 0.0))
+    return max(float(DEFAULT_PROFIT), MODEL_ROUNDTRIP_COST_PCT + (MIN_NET_PROFIT_USDT/stake)*100.0)
+
+def _scalp_move_pct(symbol, t):
+    # Use observed recent movement, not a directional prediction.
+    vals=[]
+    for k in ('change_1m_pct','change_2m_pct','change_3m_pct','change_4m_pct'):
+        try: vals.append(abs(float(t.get(k,0) or 0)))
+        except (TypeError,ValueError): pass
+    with RADAR.lock:
+        bars=list(RADAR.bars.get(str(symbol).upper().replace('/',''),()))
+    ranges=[]
+    for b in bars[-5:]:
+        try:
+            hi=float(b.get('high') or 0); lo=float(b.get('low') or 0)
+            if hi>0 and lo>0: ranges.append((hi-lo)/lo*100.0)
+        except (TypeError,ValueError): pass
+    return max(vals+[0.0]+ranges)
 
 def _indicators(symbol):
     s=str(symbol).upper().replace('/','')
@@ -78,12 +104,16 @@ async def radar_core(force=False):
             if vr>=1.0: cfs+=1
             if buy>=0.52: cfs+=1
             if risk<=2.0: cfs+=1
+            scalp_move=_scalp_move_pct(s,t)
             usable=bool(ind['ready'] and ind['ready_1m'] and cfs>=7 and ind['ema9']>ind['ema21']
                         and ind['ema9_1m']>=ind['ema21_1m'] and 52.0<=ind['rsi']<=72.0
-                        and one>0 and two>0 and three>0 and vr>=1.0 and risk<=2.0)
+                        and one>0 and two>0 and three>0 and vr>=1.0 and risk<=2.0
+                        and scalp_move>=MIN_SCALP_MOVE_PCT)
             score=float(t.get('score',0) or 0)+cfs*5.0+max(0.0,vr-1.0)*8.0+max(0.0,buy-.5)*20.0
+            row_extra_move=scalp_move
             row=dict(t)
             row.update({'entry_allowed':usable,'entry_score':round(score,2),'entry_confirmations':cfs,
+                        'scalp_move_pct':round(row_extra_move,3),'min_scalp_move_pct':MIN_SCALP_MOVE_PCT,
                         'ema9_3m':round(ind['ema9'],10),'ema21_3m':round(ind['ema21'],10),
                         'ema9_1m':round(ind['ema9_1m'],10),'ema21_1m':round(ind['ema21_1m'],10),
                         'rsi14_3m':round(ind['rsi'],2),'indicator_tf':'3m',
@@ -126,11 +156,11 @@ async def manage_core():
             live=((float(cur)/entry)-1.0)*100.0 if entry else 0.0
             p['delta_usdt']=live/100.0*stake
             p['age_seconds']=max(0,int(now-float(p.get('opened') or now)));p['age']=p['age_seconds']
-            target=float(legacy.S.get('profit',DEFAULT_PROFIT) or DEFAULT_PROFIT)
+            target=float(p.get('target_pct') or _required_target_pct(stake))
             if target>0 and live>=target:
                 await legacy.close(p,'PROFIT_TARGET');continue
-            if p['age_seconds']>=SOFT_TIMEOUT and live>=0.30:
-                await legacy.close(p,'TIMEOUT');continue
+            # Do not force a tiny +0.30% exit after 90 seconds. The position
+            # gets the full scalp window and is force-closed only at 5 minutes.
             if p in legacy.S.get('positions',[]) and p['age_seconds']>=HARD_TIMEOUT:
                 await legacy.close(p,'MAX_HOLD')
         except Exception as e:
@@ -170,9 +200,13 @@ async def open_core(i,symbol):
     # AUTO TOP-10, but it must never veto an already occupied slot.
     # The user can therefore fill slots from TOP-20 (or manually), press BOT ON,
     # and the occupied slots are sent to the selected execution mode.
-    if legacy.S.get('mode') in {'PAPER','BINANCE_TEST'}:
-        legacy.S.setdefault('pair_cooldown',{}).pop(s,None)
     await _original_open(i,s)
+    # Store the economic minimum target on the position so it remains stable
+    # even if the session input is changed later.
+    for p in reversed(legacy.S.get('positions',[])):
+        if str(p.get('symbol','')).upper().replace('/','')==s and int(p.get('slot',-1))==i:
+            p['target_pct']=_required_target_pct(float(p.get('stake') or 0.0))
+            break
 legacy.open_pos=open_core
 
 PAPER_MAKER_FEE_RATE=0.001
@@ -321,11 +355,26 @@ async def close_position_core(b:dict):
             target=p; break
     if target is None:
         raise HTTPException(404,'Open position not found')
+    slot=target.get('slot')
+    sym=str(target.get('symbol','')).upper().replace('/','')
     try:
         await legacy.close(target,'MANUAL_CLOSE')
     except Exception as e:
         legacy.S['error']=f'Close {target.get("symbol")}: {type(e).__name__}: {e}'
         raise HTTPException(502,legacy.S['error'])
+    # A manual close frees the execution slot and blocks immediate re-entry
+    # of the same pair. AUTO TOP can then refill it with the next eligible pair.
+    try:
+        si=int(slot)
+        if 0 <= si < ROTATION_POOL:
+            slots=list(legacy.S.get('slots',[]))
+            while len(slots)<ROTATION_POOL: slots.append(None)
+            slots[si]=None
+            legacy.S['slots']=slots[:ROTATION_POOL]
+    except (TypeError,ValueError):
+        pass
+    if sym:
+        legacy.S.setdefault('pair_cooldown',{})[sym]=time.time()+180.0
     return await legacy.state()
 
 for r in list(legacy.app.router.routes):
@@ -375,4 +424,4 @@ async def auto_top_core(b:AutoTopBody):
 
 legacy.S['profit']=DEFAULT_PROFIT
 legacy.S['reinvest']=True
-print('FAST_SCALPER_CORE ROTATION_POOL=20 TRADE_SLOTS=10 TP_DEFAULT=0.33 SOFT=90 HARD=300 ENTRY=3M_EMA+1M_EMA+RSI+VOLUME COOLDOWN=180',flush=True)
+print('FAST_SCALPER_CORE ROTATION_POOL=20 TRADE_SLOTS=10 TP_DEFAULT=0.45 MIN_NET=0.02 COST=0.30 MIN_MOVE=0.45 HARD=300 ENTRY=SCALP_FILTER COOLDOWN=180',flush=True)
