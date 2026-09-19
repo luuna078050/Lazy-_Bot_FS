@@ -78,7 +78,22 @@ async def close(p,reason):
  if S['mode']=='BINANCE_TEST':
   r=await B.market_sell(p['symbol'],p['qty']);status=r.get('status','')
   if status!='FILLED':raise RuntimeError(f'Binance SELL not filled: {status or r}')
-  xp=float(r.get('cummulativeQuoteQty') or 0)/float(r.get('executedQty') or p['qty']);proceeds=float(r.get('cummulativeQuoteQty') or 0);pnl=proceeds-p['stake'];S['free']+=proceeds
+  xp=float(r.get('cummulativeQuoteQty') or 0)/float(r.get('executedQty') or p['qty']);proceeds=float(r.get('cummulativeQuoteQty') or 0)
+  # Use Binance's actual FULL-order fills for realized fees. Binance reports
+  # commission in the asset received by the trade, so base-asset buy fees are
+  # converted to USDT at the fill price and quote-asset sell fees are taken
+  # directly from proceeds.
+  buy_fee_usdt=float(p.get('buy_fee_usdt') or 0.0)
+  sell_fee_usdt=0.0
+  for fill in (r.get('fills') or []):
+   try:
+    comm=float(fill.get('commission') or 0); ca=str(fill.get('commissionAsset') or '')
+    fp=float(fill.get('price') or xp)
+    if ca=='USDT': sell_fee_usdt += comm
+    elif ca==str(p.get('symbol','')).upper().replace('/','')[:-4]: sell_fee_usdt += comm*fp
+   except (TypeError,ValueError): pass
+  pnl=proceeds-sell_fee_usdt-float(p['stake'])-buy_fee_usdt
+  S['free']+=proceeds-sell_fee_usdt
   if S['reinvest']:
    S['bot']+=pnl
   else:
@@ -105,7 +120,15 @@ async def open_pos(i,s):
    if status!='FILLED':raise RuntimeError(f'Binance BUY not filled: {status or r}')
    qty=float(r.get('executedQty') or 0);spent=float(r.get('cummulativeQuoteQty') or 0)
    if qty<=0 or spent<=0:raise RuntimeError(f'Binance BUY returned empty fill: {r}')
-   ep=spent/qty;S['free']-=spent;p={'id':f"B{r.get('orderId',int(time.time()*1000))}",'slot':i,'symbol':s,'tf':TF,'entry':ep,'current':ep,'stake':spent,'qty':qty,'opened':time.time(),'opened_at':now(),'order_id':r.get('orderId')};S['positions'].append(p);S['orders'].insert(0,{'time':now(),'symbol':s,'side':'BUY','status':status,'price':ep,'qty':qty,'stake':spent,'order_id':r.get('orderId'),'slot':i})
+   buy_fee_usdt=0.0
+   for fill in (r.get('fills') or []):
+    try:
+     comm=float(fill.get('commission') or 0);ca=str(fill.get('commissionAsset') or '')
+     fp=float(fill.get('price') or (spent/qty))
+     if ca=='USDT': buy_fee_usdt += comm
+     elif ca==s[:-4]: buy_fee_usdt += comm*fp
+    except (TypeError,ValueError): pass
+   ep=spent/qty;S['free']-=spent;p={'id':f"B{r.get('orderId',int(time.time()*1000))}",'slot':i,'symbol':s,'tf':TF,'entry':ep,'current':ep,'stake':spent,'qty':qty,'buy_fee_usdt':buy_fee_usdt,'qty_received':qty,'opened':time.time(),'opened_at':now(),'order_id':r.get('orderId')};S['positions'].append(p);S['orders'].insert(0,{'time':now(),'symbol':s,'side':'BUY','status':status,'price':ep,'qty':qty,'stake':spent,'order_id':r.get('orderId'),'slot':i})
   except Exception as e:S['error']=f'Binance BUY {s}: {type(e).__name__}: {e}'
   return
  if S['free']<=0:return
