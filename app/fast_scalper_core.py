@@ -176,7 +176,7 @@ async def manage_core():
             # Require both the target percentage and a positive modeled net
             # cushion before sending a market SELL. This prevents a stale
             # radar quote from turning a PROFIT_TARGET into a losing fill.
-            if target>0 and live>=target+0.10 and modeled_net>=MIN_NET_PROFIT_USDT:
+            if target>0 and live>=target+0.25 and modeled_net>=MIN_NET_PROFIT_USDT:
                 await legacy.close(p,'PROFIT_TARGET');continue
             # Do not force a tiny +0.30% exit after 90 seconds. The position
             # gets the full scalp window and is force-closed only at 5 minutes.
