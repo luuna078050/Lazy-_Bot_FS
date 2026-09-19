@@ -147,8 +147,20 @@ async def position_close_runtime(b:dict):
     symbol=normalize_symbol(b.get('symbol'))
     target=next((p for p in legacy.S.get('positions',[]) if (ident and str(p.get('id'))==ident) or (symbol and normalize_symbol(p.get('symbol'))==symbol)),None)
     if target is None: raise HTTPException(404,'Open position not found')
+    slot=target.get('slot')
+    sym=normalize_symbol(target.get('symbol'))
     try: await legacy.close(target,'MANUAL_CLOSE')
     except Exception as e: raise HTTPException(502,f'Close {target.get("symbol")}: {type(e).__name__}: {e}')
+    # Manual close releases the execution slot and blocks the same pair for 3 minutes.
+    try:
+        si=int(slot)
+        slots=list(legacy.S.get('slots',[]))
+        while len(slots)<ROTATION_POOL: slots.append(None)
+        if 0 <= si < TRADE_SLOTS: slots[si]=None
+        legacy.S['slots']=slots[:ROTATION_POOL]
+    except (TypeError,ValueError):
+        pass
+    if sym: legacy.S.setdefault('pair_cooldown',{})[sym]=__import__('time').time()+180.0
     return state_payload()
 
 @legacy.app.post('/api/withdraw')
