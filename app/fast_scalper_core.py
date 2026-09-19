@@ -13,7 +13,7 @@ DEFAULT_PROFIT = 0.33
 DEFAULT_PAPER_BOT = 0.0
 SOFT_TIMEOUT = 90.0
 ROTATION_SECONDS = 60.0
-HARD_TIMEOUT = 300.0
+HARD_TIMEOUT = 60.0
 
 # Scalp economics: the target must cover the modeled round-trip costs and
 # leave at least 0.02 USDT net on a small (~15 USDT) position.
