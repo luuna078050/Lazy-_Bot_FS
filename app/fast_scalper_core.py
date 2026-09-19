@@ -147,17 +147,36 @@ def refresh_slots():
 legacy.radar=radar_core
 legacy.MAX_AGE=SOFT_TIMEOUT
 
+async def _execution_price(symbol):
+    s=str(symbol).upper().replace('/','')
+    # For BINANCE_TEST use the execution venue's own ticker immediately before
+    # a target decision; the radar stream can lag the actual fill price.
+    if legacy.S.get('mode')=='BINANCE_TEST':
+        try:
+            async with httpx.AsyncClient(timeout=1.5) as client:
+                r=await client.get(f"{legacy.B.base}/v3/ticker/price",params={'symbol':s})
+                r.raise_for_status()
+                px=float((r.json() or {}).get('price') or 0)
+                if px>0: return px
+        except Exception:
+            pass
+    return float(legacy.price(s) or 0)
+
 async def manage_core():
     now=time.time()
     for p in list(legacy.S.get('positions',[])):
         try:
-            cur=legacy.price(p['symbol']) or p.get('current') or p.get('entry');p['current']=cur
+            cur=await _execution_price(p['symbol']) or p.get('current') or p.get('entry');p['current']=cur
             entry=float(p.get('entry') or 0);stake=float(p.get('stake') or 0)
             live=((float(cur)/entry)-1.0)*100.0 if entry else 0.0
             p['delta_usdt']=live/100.0*stake
             p['age_seconds']=max(0,int(now-float(p.get('opened') or now)));p['age']=p['age_seconds']
             target=float(p.get('target_pct') or _required_target_pct(stake))
-            if target>0 and live>=target:
+            modeled_net=stake*(live/100.0-MODEL_ROUNDTRIP_COST_PCT/100.0)
+            # Require both the target percentage and a positive modeled net
+            # cushion before sending a market SELL. This prevents a stale
+            # radar quote from turning a PROFIT_TARGET into a losing fill.
+            if target>0 and live>=target+0.10 and modeled_net>=MIN_NET_PROFIT_USDT:
                 await legacy.close(p,'PROFIT_TARGET');continue
             # Do not force a tiny +0.30% exit after 90 seconds. The position
             # gets the full scalp window and is force-closed only at 5 minutes.
