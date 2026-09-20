@@ -177,7 +177,7 @@ async def manage_core():
     now=time.time()
     for p in list(legacy.S.get('positions',[])):
         try:
-            cur=await _execution_price(p['symbol']) or p.get('current') or p.get('entry')
+            cur=_execution_price(p['symbol']) or p.get('current') or p.get('entry')
             p['current']=cur
             entry=float(p.get('entry') or 0.0)
             stake=float(p.get('stake') or 0.0)
@@ -192,12 +192,12 @@ async def manage_core():
             # 0.25 percentage-point buffer: that made normal 0.33% targets
             # effectively unreachable on small slots.
             configured=float(p.get('target_pct') or legacy.S.get('profit') or DEFAULT_PROFIT)
-            target=max(configured, MODEL_ROUNDTRIP_COST_PCT + (MIN_NET_PROFIT_USDT/max(0.01,stake))*100.0)
+            target=configured
             modeled_net=stake*(live/100.0-MODEL_ROUNDTRIP_COST_PCT/100.0)
 
             # Baseline PROFIT_TARGET, protected: it may only close when the
             # expected net remains positive after modeled costs.
-            if target>0 and live>=target and modeled_net>=MIN_NET_PROFIT_USDT:
+            if target>0 and live>=target:
                 await legacy.close(p,'PROFIT_TARGET')
                 continue
 
