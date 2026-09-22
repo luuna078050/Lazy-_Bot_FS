@@ -53,8 +53,9 @@ def _series_indicators(bars):
         if len(window)<5: continue
         lo=min(window); hi=max(window)
         raw.append(50.0 if hi<=lo else (closes[i]-lo)/(hi-lo)*100.0)
-    stoch_k=sum(raw[-3:])/max(1,len(raw[-3:]))
-    stoch_d=sum(raw[-5:-2])/max(1,len(raw[-5:-2])) if len(raw)>=5 else stoch_k
+    smoothed_k=[sum(raw[i-2:i+1])/3.0 for i in range(2,len(raw))]
+    stoch_k=smoothed_k[-1] if smoothed_k else 50.0
+    stoch_d=sum(smoothed_k[-3:])/max(1,len(smoothed_k[-3:]))
     return {'ready':True,'ema9':ema(9),'ema21':ema(21),'rsi':rsi,
             'stoch_k':stoch_k,'stoch_d':stoch_d,'ma20':sma(20),'mma20':mma(20)}
 
