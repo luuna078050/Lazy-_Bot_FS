@@ -27,17 +27,58 @@ legacy.S.setdefault('pair_cooldown',{})
 def _series_indicators(bars):
     closes=[float(x.get('close') or 0) for x in bars if float(x.get('close') or 0)>0]
     if len(closes)<21:
-        return {'ready':False,'ema9':0.0,'ema21':0.0,'rsi':50.0}
+        return {'ready':False,'ema9':0.0,'ema21':0.0,'rsi':50.0,'stoch_k':50.0,'stoch_d':50.0,'ma20':0.0,'mma20':0.0}
     vals=closes[-80:]
     def ema(period):
         k=2.0/(period+1.0); e=vals[0]
         for v in vals[1:]: e=float(v)*k+e*(1.0-k)
         return e
+    def sma(period):
+        a=closes[-period:]
+        return sum(a)/len(a) if len(a)==period else 0.0
+    def mma(period):
+        a=closes[-period:]
+        if len(a)<period: return 0.0
+        m=sum(a[:period])/period
+        for v in closes[-period+1:]:
+            m=((period-1.0)*m+float(v))/period
+        return m
     diffs=[bb-aa for aa,bb in zip(closes[-15:],closes[-14:])]
     gains=[max(0.0,d) for d in diffs]; losses=[max(0.0,-d) for d in diffs]
     ag=sum(gains)/14.0; al=sum(losses)/14.0
     rsi=100.0 if al<=1e-12 and ag>0 else (50.0 if al<=1e-12 else 100.0-100.0/(1.0+ag/al))
-    return {'ready':True,'ema9':ema(9),'ema21':ema(21),'rsi':rsi}
+    raw=[]
+    for i in range(max(4,len(closes)-20),len(closes)):
+        window=closes[i-4:i+1]
+        if len(window)<5: continue
+        lo=min(window); hi=max(window)
+        raw.append(50.0 if hi<=lo else (closes[i]-lo)/(hi-lo)*100.0)
+    stoch_k=sum(raw[-3:])/max(1,len(raw[-3:]))
+    stoch_d=sum(raw[-5:-2])/max(1,len(raw[-5:-2])) if len(raw)>=5 else stoch_k
+    return {'ready':True,'ema9':ema(9),'ema21':ema(21),'rsi':rsi,
+            'stoch_k':stoch_k,'stoch_d':stoch_d,'ma20':sma(20),'mma20':mma(20)}
+
+def _indicators(symbol):
+    s=str(symbol).upper().replace('/','')
+    with RADAR.lock:
+        bars1=list(RADAR.bars.get(s,()))
+        bars3=list(getattr(RADAR,'bars_3m',{}).get(s,()))
+        bars5=list(getattr(RADAR,'bars_5m',{}).get(s,()))
+        bars15=list(getattr(RADAR,'bars_15m',{}).get(s,()))
+    i1=_series_indicators(bars1); i3=_series_indicators(bars3)
+    i5=_series_indicators(bars5); i15=_series_indicators(bars15)
+    return {'ready':all(x['ready'] for x in (i1,i3,i5,i15)),
+            'ready_1m':i1['ready'],'ready_3m':i3['ready'],'ready_5m':i5['ready'],'ready_15m':i15['ready'],
+            'tf':'1m/3m/5m/15m',
+            'ema9':i3['ema9'],'ema21':i3['ema21'],'rsi':i3['rsi'],
+            'ema9_1m':i1['ema9'],'ema21_1m':i1['ema21'],'rsi_1m':i1['rsi'],
+            'rsi_5m':i5['rsi'],'rsi_15m':i15['rsi'],
+            'stoch_k_1m':i1['stoch_k'],'stoch_d_1m':i1['stoch_d'],
+            'stoch_k_3m':i3['stoch_k'],'stoch_d_3m':i3['stoch_d'],
+            'stoch_k_5m':i5['stoch_k'],'stoch_d_5m':i5['stoch_d'],
+            'stoch_k_15m':i15['stoch_k'],'stoch_d_15m':i15['stoch_d'],
+            'ma20_1m':i1['ma20'],'ma20_3m':i3['ma20'],'ma20_5m':i5['ma20'],'ma20_15m':i15['ma20'],
+            'mma20_1m':i1['mma20'],'mma20_3m':i3['mma20'],'mma20_5m':i5['mma20'],'mma20_15m':i15['mma20']}
 
 def _required_target_pct(stake):
     stake=max(0.01,float(stake or 0.0))
@@ -95,9 +136,19 @@ async def radar_core(force=False):
             vr=float(t.get('volume_ratio',0) or 0)
             buy=float(t.get('buy_ratio',0.5) or 0.5)
             risk=float(t.get('risk_pct',0) or 0)
-            if ind['ready'] and ind['ema9']>ind['ema21']: cfs+=1
+            if ind['ready_3m'] and ind['ema9']>ind['ema21']: cfs+=1
             if ind['ready_1m'] and ind['ema9_1m']>ind['ema21_1m']: cfs+=1
-            if ind['ready'] and 52.0<=ind['rsi']<=72.0: cfs+=1
+            if ind['ready_3m'] and 52.0<=ind['rsi']<=72.0: cfs+=1
+            if ind['ready_5m'] and 50.0<=ind['rsi_5m']<=72.0: cfs+=1
+            if ind['ready_15m'] and ind['rsi_15m']>=48.0: cfs+=1
+            if ind['ready_1m'] and ind['stoch_k_1m']>ind['stoch_d_1m'] and 15.0<=ind['stoch_k_1m']<=90.0: cfs+=1
+            if ind['ready_3m'] and ind['stoch_k_3m']>ind['stoch_d_3m'] and 15.0<=ind['stoch_k_3m']<=90.0: cfs+=1
+            if ind['ready_5m'] and ind['stoch_k_5m']>ind['stoch_d_5m'] and 15.0<=ind['stoch_k_5m']<=90.0: cfs+=1
+            if ind['ready_15m'] and ind['stoch_k_15m']>=ind['stoch_d_15m']: cfs+=1
+            if ind['ready_1m'] and ind['ma20_1m']>0 and ind['mma20_1m']>0 and ind['ma20_1m']>=ind['mma20_1m']: cfs+=1
+            if ind['ready_3m'] and ind['ma20_3m']>0 and ind['mma20_3m']>0 and ind['ma20_3m']>=ind['mma20_3m']: cfs+=1
+            if ind['ready_5m'] and ind['ma20_5m']>0 and ind['mma20_5m']>0 and ind['ma20_5m']>=ind['mma20_5m']: cfs+=1
+            if ind['ready_15m'] and ind['ma20_15m']>0 and ind['mma20_15m']>0 and ind['ma20_15m']>=ind['mma20_15m']: cfs+=1
             if one>0.05: cfs+=1
             if two>0.05: cfs+=1
             if three>0.10: cfs+=1
@@ -106,8 +157,13 @@ async def radar_core(force=False):
             if buy>=0.52: cfs+=1
             if risk<=2.0: cfs+=1
             scalp_move=_scalp_move_pct(s,t)
-            usable=bool(ind['ready'] and ind['ready_1m'] and cfs>=7 and ind['ema9']>ind['ema21']
-                        and ind['ema9_1m']>=ind['ema21_1m'] and 52.0<=ind['rsi']<=72.0
+            usable=bool(ind['ready'] and cfs>=10
+                        and ind['ema9']>ind['ema21'] and ind['ema9_1m']>=ind['ema21_1m']
+                        and 52.0<=ind['rsi']<=72.0 and ind['rsi_5m']>=50.0 and ind['rsi_15m']>=48.0
+                        and ind['stoch_k_1m']>ind['stoch_d_1m'] and ind['stoch_k_3m']>ind['stoch_d_3m']
+                        and ind['stoch_k_5m']>ind['stoch_d_5m'] and ind['stoch_k_15m']>=ind['stoch_d_15m']
+                        and ind['ma20_1m']>=ind['mma20_1m'] and ind['ma20_3m']>=ind['mma20_3m']
+                        and ind['ma20_5m']>=ind['mma20_5m'] and ind['ma20_15m']>=ind['mma20_15m']
                         and one>0 and two>0 and three>0 and vr>=1.0 and risk<=2.0
                         and scalp_move>=MIN_SCALP_MOVE_PCT)
             score=float(t.get('score',0) or 0)+cfs*5.0+max(0.0,vr-1.0)*8.0+max(0.0,buy-.5)*20.0
@@ -117,7 +173,12 @@ async def radar_core(force=False):
                         'scalp_move_pct':round(row_extra_move,3),'min_scalp_move_pct':MIN_SCALP_MOVE_PCT,
                         'ema9_3m':round(ind['ema9'],10),'ema21_3m':round(ind['ema21'],10),
                         'ema9_1m':round(ind['ema9_1m'],10),'ema21_1m':round(ind['ema21_1m'],10),
-                        'rsi14_3m':round(ind['rsi'],2),'indicator_tf':'3m',
+                        'rsi14_3m':round(ind['rsi'],2),'rsi14_5m':round(ind['rsi_5m'],2),'rsi14_15m':round(ind['rsi_15m'],2),
+                        'stoch_1m':round(ind['stoch_k_1m'],2),'stoch_3m':round(ind['stoch_k_3m'],2),'stoch_5m':round(ind['stoch_k_5m'],2),'stoch_15m':round(ind['stoch_k_15m'],2),
+                        'stoch_d_1m':round(ind['stoch_d_1m'],2),'stoch_d_3m':round(ind['stoch_d_3m'],2),'stoch_d_5m':round(ind['stoch_d_5m'],2),'stoch_d_15m':round(ind['stoch_d_15m'],2),
+                        'ma20_1m':round(ind['ma20_1m'],10),'ma20_3m':round(ind['ma20_3m'],10),'ma20_5m':round(ind['ma20_5m'],10),'ma20_15m':round(ind['ma20_15m'],10),
+                        'mma20_1m':round(ind['mma20_1m'],10),'mma20_3m':round(ind['mma20_3m'],10),'mma20_5m':round(ind['mma20_5m'],10),'mma20_15m':round(ind['mma20_15m'],10),
+                        'indicator_tf':'1m/3m/5m/15m',
                         'candidate_pool':'TOP-20','signal':'BUY' if usable else 'WATCH'})
             ranked.append(row)
         ranked.sort(key=lambda z:(1 if z.get('entry_allowed') else 0,float(z.get('entry_score',0)),float(z.get('score',0))),reverse=True)
