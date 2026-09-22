@@ -11,7 +11,7 @@ TOP150=150; STAGE1=80; STAGE2=40; STAGE3=25; FINAL=15
 
 class MarketRadar:
  def __init__(self,top_n:int=FINAL):
-  self.top_n=top_n; self.lock=threading.RLock(); self.tickers={}; self.bars=defaultdict(lambda:deque(maxlen=100)); self.bars_3m=defaultdict(lambda:deque(maxlen=100)); self.pulses=defaultdict(lambda:deque(maxlen=90)); self._ws=None; self._stop=threading.Event(); self._thread=None; self._ready=threading.Event(); self.connected=False; self.last_error=None; self.last_update=0.0; self.message_count=0; self.stage_counts={"universe":0,"top150":0,"stage1":0,"stage2":0,"stage3":0,"top15":0}; self.last_snapshot=0.0; self._stream_symbols=()
+  self.top_n=top_n; self.lock=threading.RLock(); self.tickers={}; self.bars=defaultdict(lambda:deque(maxlen=100)); self.bars_3m=defaultdict(lambda:deque(maxlen=100)); self.bars_5m=defaultdict(lambda:deque(maxlen=100)); self.bars_15m=defaultdict(lambda:deque(maxlen=100)); self.pulses=defaultdict(lambda:deque(maxlen=90)); self._ws=None; self._stop=threading.Event(); self._thread=None; self._ready=threading.Event(); self.connected=False; self.last_error=None; self.last_update=0.0; self.message_count=0; self.stage_counts={"universe":0,"top150":0,"stage1":0,"stage2":0,"stage3":0,"top15":0}; self.last_snapshot=0.0; self._stream_symbols=()
  def start(self):
   if self._thread and self._thread.is_alive(): return
   self._stop.clear(); self._thread=threading.Thread(target=self._run,daemon=True,name="fast-scalper-market-radar"); self._thread.start()
@@ -25,7 +25,7 @@ class MarketRadar:
  def _build_url(self,symbols=None):
   streams=["!miniTicker@arr"]
   if symbols:
-   streams += [f"{s.lower()}@kline_1m" for s in symbols]; streams += [f"{s.lower()}@kline_3m" for s in symbols]; streams += [f"{s.lower()}@aggTrade" for s in symbols]
+   streams += [f"{s.lower()}@kline_1m" for s in symbols]; streams += [f"{s.lower()}@kline_3m" for s in symbols]; streams += [f"{s.lower()}@kline_5m" for s in symbols]; streams += [f"{s.lower()}@kline_15m" for s in symbols]; streams += [f"{s.lower()}@aggTrade" for s in symbols]
   return "wss://stream.binance.com:443/stream?streams="+"/".join(streams)
  def _top_symbols(self):
   with self.lock: rows=[(s,float(d.get("q",0) or 0)) for s,d in self.tickers.items() if s.endswith("USDT") and s[:-4] not in STABLE_BASES and float(d.get("q",0) or 0)>=MIN_24H_QUOTE]
@@ -88,7 +88,7 @@ class MarketRadar:
   except (TypeError,ValueError):return
   with self.lock:
    interval=str(k.get("i","1m") or "1m")
-   target=self.bars_3m if interval=="3m" else self.bars
+   target=(self.bars_3m if interval=="3m" else self.bars_5m if interval=="5m" else self.bars_15m if interval=="15m" else self.bars)
    b=target[s]
    if b and b[-1]["ts"]==r["ts"]:b[-1]=r
    else:b.append(r)
