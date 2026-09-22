@@ -24,7 +24,7 @@ MIN_SCALP_MOVE_PCT = 0.45
 legacy.S['auto_top'] = True
 legacy.S.setdefault('pair_cooldown',{})
 
-def _series_indicators(bars):
+def _series_indicators(bars, rsi_period=14):
     closes=[float(x.get('close') or 0) for x in bars if float(x.get('close') or 0)>0]
     if len(closes)<21:
         return {'ready':False,'ema9':0.0,'ema21':0.0,'rsi':50.0,'stoch_k':50.0,'stoch_d':50.0,'ma20':0.0,'mma20':0.0}
@@ -43,9 +43,10 @@ def _series_indicators(bars):
         for v in closes[-period+1:]:
             m=((period-1.0)*m+float(v))/period
         return m
-    diffs=[bb-aa for aa,bb in zip(closes[-15:],closes[-14:])]
+    rp=max(2,int(rsi_period))
+    diffs=[bb-aa for aa,bb in zip(closes[-(rp+1):],closes[-rp:])]
     gains=[max(0.0,d) for d in diffs]; losses=[max(0.0,-d) for d in diffs]
-    ag=sum(gains)/14.0; al=sum(losses)/14.0
+    ag=sum(gains)/float(rp); al=sum(losses)/float(rp)
     rsi=100.0 if al<=1e-12 and ag>0 else (50.0 if al<=1e-12 else 100.0-100.0/(1.0+ag/al))
     raw=[]
     for i in range(max(4,len(closes)-20),len(closes)):
@@ -66,14 +67,18 @@ def _indicators(symbol):
         bars3=list(getattr(RADAR,'bars_3m',{}).get(s,()))
         bars5=list(getattr(RADAR,'bars_5m',{}).get(s,()))
         bars15=list(getattr(RADAR,'bars_15m',{}).get(s,()))
-    i1=_series_indicators(bars1); i3=_series_indicators(bars3)
-    i5=_series_indicators(bars5); i15=_series_indicators(bars15)
+    # RSI hierarchy for scalping: 1m=7, 3m=9, 5m=14, 15m=14.
+    i1=_series_indicators(bars1,7)
+    i3=_series_indicators(bars3,9)
+    i5=_series_indicators(bars5,14)
+    i15=_series_indicators(bars15,14)
     return {'ready':all(x['ready'] for x in (i1,i3,i5,i15)),
             'ready_1m':i1['ready'],'ready_3m':i3['ready'],'ready_5m':i5['ready'],'ready_15m':i15['ready'],
             'tf':'1m/3m/5m/15m',
             'ema9':i3['ema9'],'ema21':i3['ema21'],'rsi':i3['rsi'],
             'ema9_1m':i1['ema9'],'ema21_1m':i1['ema21'],'rsi_1m':i1['rsi'],
             'rsi_5m':i5['rsi'],'rsi_15m':i15['rsi'],
+            'rsi_period_1m':7,'rsi_period_3m':9,'rsi_period_5m':14,'rsi_period_15m':14,
             'stoch_k_1m':i1['stoch_k'],'stoch_d_1m':i1['stoch_d'],
             'stoch_k_3m':i3['stoch_k'],'stoch_d_3m':i3['stoch_d'],
             'stoch_k_5m':i5['stoch_k'],'stoch_d_5m':i5['stoch_d'],
@@ -174,7 +179,7 @@ async def radar_core(force=False):
                         'scalp_move_pct':round(row_extra_move,3),'min_scalp_move_pct':MIN_SCALP_MOVE_PCT,
                         'ema9_3m':round(ind['ema9'],10),'ema21_3m':round(ind['ema21'],10),
                         'ema9_1m':round(ind['ema9_1m'],10),'ema21_1m':round(ind['ema21_1m'],10),
-                        'rsi14_3m':round(ind['rsi'],2),'rsi14_5m':round(ind['rsi_5m'],2),'rsi14_15m':round(ind['rsi_15m'],2),
+                        'rsi7_1m':round(ind['rsi_1m'],2),'rsi9_3m':round(ind['rsi'],2),'rsi14_5m':round(ind['rsi_5m'],2),'rsi14_15m':round(ind['rsi_15m'],2),
                         'stoch_1m':round(ind['stoch_k_1m'],2),'stoch_3m':round(ind['stoch_k_3m'],2),'stoch_5m':round(ind['stoch_k_5m'],2),'stoch_15m':round(ind['stoch_k_15m'],2),
                         'stoch_d_1m':round(ind['stoch_d_1m'],2),'stoch_d_3m':round(ind['stoch_d_3m'],2),'stoch_d_5m':round(ind['stoch_d_5m'],2),'stoch_d_15m':round(ind['stoch_d_15m'],2),
                         'ma20_1m':round(ind['ma20_1m'],10),'ma20_3m':round(ind['ma20_3m'],10),'ma20_5m':round(ind['ma20_5m'],10),'ma20_15m':round(ind['ma20_15m'],10),
