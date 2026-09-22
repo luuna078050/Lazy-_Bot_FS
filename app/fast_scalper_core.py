@@ -106,23 +106,6 @@ def _scalp_move_pct(symbol, t):
         except (TypeError,ValueError): pass
     return max(vals+[0.0]+ranges)
 
-def _indicators(symbol):
-    s=str(symbol).upper().replace('/','')
-    with RADAR.lock:
-        bars1=list(RADAR.bars.get(s,()))
-        bars3=list(getattr(RADAR,'bars_3m',{}).get(s,()))
-    i1=_series_indicators(bars1)
-    i3=_series_indicators(bars3)
-    if not i3['ready']:
-        return {'ready':False,'ready_1m':i1['ready'],'tf':'3m','ema9':0.0,'ema21':0.0,'rsi':50.0,
-                'ema9_1m':i1['ema9'],'ema21_1m':i1['ema21'],'rsi_1m':i1['rsi'],'volume_ratio_3m':0.0}
-    vols=[max(0.0,float(x.get('quote_volume') or 0)) for x in bars3[-21:]]
-    base=sum(vols[:-1])/max(1,len(vols[:-1])) if len(vols)>=4 else 0.0
-    vr=vols[-1]/base if base>0 and vols else 0.0
-    return {'ready':True,'ready_1m':i1['ready'],'tf':'3m','ema9':i3['ema9'],'ema21':i3['ema21'],
-            'rsi':i3['rsi'],'ema9_1m':i1['ema9'],'ema21_1m':i1['ema21'],'rsi_1m':i1['rsi'],
-            'volume_ratio_3m':vr}
-
 async def radar_core(force=False):
     if not force and legacy.S.get('last_radar') and time.time()-legacy.S['last_radar']<5: return
     try:
