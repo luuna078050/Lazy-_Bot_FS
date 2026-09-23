@@ -180,12 +180,17 @@ async def radar_core(force=False):
 def refresh_slots():
     if not legacy.S.get('auto_top', True): return
     ranked=[]; seen=set()
+    # Keep the ranking rows as dictionaries until the BUY filter is applied.
+    # Converting them to symbol strings first caused "'str' object has no
+    # attribute 'get'" and broke Radar/mode switching.
+    buy_ranked=[]
     for x in legacy.S.get('ranking',[]):
+        if not isinstance(x,dict): continue
         s=str(x.get('symbol','')).upper().replace('/','')
-        if s and s not in seen and re.fullmatch(r'[A-Z0-9]+USDT',s): ranked.append(s); seen.add(s)
-    # AUTO TOP executes only confirmed BUY candidates. WATCH rows stay in Radar
-    # but are never converted into live execution instructions.
-    buy_ranked=[x for x in ranked if x.get('entry_allowed')]
+        if not s or s in seen or not re.fullmatch(r'[A-Z0-9]+USDT',s): continue
+        ranked.append(x); seen.add(s)
+        if x.get('entry_allowed'):
+            buy_ranked.append(x)
     target=buy_ranked[:ROTATION_POOL]
     old=(list(legacy.S.get('slots',[]))+[None]*ROTATION_POOL)[:ROTATION_POOL]
     occupied={int(p.get('slot')) for p in legacy.S.get('positions',[]) if str(p.get('slot','')).lstrip('-').isdigit()}
