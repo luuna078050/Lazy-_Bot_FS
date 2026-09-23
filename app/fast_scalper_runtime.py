@@ -45,7 +45,8 @@ def apply_auto_top():
     for i,s in occ.items():
         if 0<=i<ROTATION_POOL:
             out[i]=s; used.add(s)
-    candidates=[normalize_symbol(x.get('symbol')) for x in rank]
+    # Only confirmed BUY candidates are execution candidates.
+    candidates=[normalize_symbol(x.get('symbol')) for x in rank if x.get('entry_allowed')]
     candidates=[s for s in candidates if s and s not in used]
     for i in range(TRADE_SLOTS):
         if out[i] is None and candidates:
