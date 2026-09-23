@@ -183,16 +183,22 @@ def refresh_slots():
     for x in legacy.S.get('ranking',[]):
         s=str(x.get('symbol','')).upper().replace('/','')
         if s and s not in seen and re.fullmatch(r'[A-Z0-9]+USDT',s): ranked.append(s); seen.add(s)
-    target=ranked[:ROTATION_POOL]; old=(list(legacy.S.get('slots',[]))+[None]*ROTATION_POOL)[:ROTATION_POOL]
-    occupied={int(p.get('slot')) for p in legacy.S.get('positions',[]) if str(p.get('slot','')).lstrip('-').isdigit()}; used={str(x).upper().replace('/','') for x in old if x}; final=list(old)
+    # AUTO TOP executes only confirmed BUY candidates. WATCH rows stay in Radar
+    # but are never converted into live execution instructions.
+    buy_ranked=[x for x in ranked if x.get('entry_allowed')]
+    target=buy_ranked[:ROTATION_POOL]
+    old=(list(legacy.S.get('slots',[]))+[None]*ROTATION_POOL)[:ROTATION_POOL]
+    occupied={int(p.get('slot')) for p in legacy.S.get('positions',[]) if str(p.get('slot','')).lstrip('-').isdigit()}
+    used={str(x).upper().replace('/','') for x in old if x}; final=list(old)
     for i in range(ROTATION_POOL):
         if i in occupied: continue
-        candidate=next((s for s in target if s not in used),None)
+        candidate=next((str(x.get('symbol','')).upper().replace('/','') for x in target if str(x.get('symbol','')).upper().replace('/','') not in used),None)
         if candidate:
             previous=str(final[i] or '').upper().replace('/','')
             if previous: used.discard(previous)
             final[i]=candidate; used.add(candidate)
-        else: final[i]=None
+        else:
+            final[i]=None
     legacy.S['slots']=final
 
 legacy.radar=radar_core
@@ -305,7 +311,10 @@ async def open_core(i,symbol):
     # even if the session input is changed later.
     for p in reversed(legacy.S.get('positions',[])):
         if str(p.get('symbol','')).upper().replace('/','')==s and int(p.get('slot',-1))==i:
-            p['target_pct']=_required_target_pct(float(p.get('stake') or 0.0))
+            # Respect the user's configured TP (e.g. 0.33%) exactly.
+            # Economic accounting is handled on the realized fill, not by
+            # silently raising the target for small positions.
+            p['target_pct']=float(legacy.S.get('profit') or DEFAULT_PROFIT)
             break
 legacy.open_pos=open_core
 
@@ -441,7 +450,14 @@ for r in list(legacy.app.router.routes):
     if getattr(r,'path',None)=='/api/paper/stop' and 'POST' in (getattr(r,'methods',set()) or set()): legacy.app.router.routes.remove(r)
 @legacy.app.post('/api/paper/stop')
 async def stop_core():
-    legacy.S['running']=False; legacy.S['stop_requested']=True; return await legacy.state()
+    # Freeze SESSION at BOT OFF; 24H timer remains anchored to day_started.
+    if legacy.S.get('session_started'):
+        import datetime as _dt
+        legacy.S['session_elapsed']=max(0,int(time.time()-_dt.datetime.fromisoformat(legacy.S['session_started']).timestamp()))
+    legacy.S['session_started']=None
+    legacy.S['running']=False
+    legacy.S['stop_requested']=True
+    return await legacy.state()
 
 @legacy.app.post('/api/position/close')
 async def close_position_core(b:dict):
