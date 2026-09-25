@@ -184,12 +184,14 @@ def refresh_slots():
     # Converting them to symbol strings first caused "'str' object has no
     # attribute 'get'" and broke Radar/mode switching.
     buy_ranked=[]
+    cooldowns=legacy.S.setdefault('pair_cooldown',{})
+    now=time.time()
     for x in legacy.S.get('ranking',[]):
         if not isinstance(x,dict): continue
         s=str(x.get('symbol','')).upper().replace('/','')
         if not s or s in seen or not re.fullmatch(r'[A-Z0-9]+USDT',s): continue
         ranked.append(x); seen.add(s)
-        if x.get('entry_allowed'):
+        if x.get('entry_allowed') and float(cooldowns.get(s,0) or 0)<=now:
             buy_ranked.append(x)
     target=buy_ranked[:ROTATION_POOL]
     old=(list(legacy.S.get('slots',[]))+[None]*ROTATION_POOL)[:ROTATION_POOL]
@@ -274,6 +276,11 @@ async def manage_core():
             # realize a negative PnL; it is a hard hold limit, not a target.
             if p in legacy.S.get('positions',[]) and p['age_seconds']>=HARD_TIMEOUT:
                 await legacy.close(p,'MAX_HOLD')
+                # Binance TEST legacy close does not own the strategy cooldown.
+                # Apply the same 180s MAX_HOLD cooldown used by PAPER.
+                sym=str(p.get('symbol','')).upper().replace('/','')
+                if sym:
+                    legacy.S.setdefault('pair_cooldown',{})[sym]=time.time()+180.0
         except Exception as e:
             legacy.S['error']=f'Manage {p.get("symbol")}: {type(e).__name__}: {e}'
 legacy.manage=manage_core
