@@ -5,6 +5,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel
 from . import fast_scalper_beta_001_legacy as legacy
 from .market_radar import RADAR
+from .three_phase import analyze_three_phase
 
 ROTATION_POOL = 20
 TRADE_SLOTS = 10
@@ -106,6 +107,30 @@ def _scalp_move_pct(symbol, t):
         except (TypeError,ValueError): pass
     return max(vals+[0.0]+ranges)
 
+async def _three_phase_market_data(symbol):
+    """Fetch enough OHLCV/order-book context for the three-phase entry gate."""
+    try:
+        async with httpx.AsyncClient(timeout=2.5) as client:
+            kl=await client.get(f"{legacy.B.base}/v3/klines",params={"symbol":symbol,"interval":"1m","limit":120})
+            kl.raise_for_status(); rows=kl.json()
+            book=await client.get(f"{legacy.B.base}/v3/depth",params={"symbol":symbol,"limit":100})
+            book.raise_for_status(); b=book.json()
+        closes=[float(x[4]) for x in rows]; highs=[float(x[2]) for x in rows]
+        lows=[float(x[3]) for x in rows]; vols=[float(x[5]) for x in rows]
+        bids=[(float(p),float(q)) for p,q in b.get("bids",[]) if float(p)>0 and float(q)>0]
+        asks=[(float(p),float(q)) for p,q in b.get("asks",[]) if float(p)>0 and float(q)>0]
+        mid=(bids[0][0]+asks[0][0])/2 if bids and asks else (closes[-1] if closes else 0)
+        qs=[q for _,q in bids+asks]; med=sorted(qs)[len(qs)//2] if qs else 0
+        threshold=max(med*3,(sum(qs)/len(qs))*2 if qs else 0)
+        bid_walls=[x for x in bids if x[1]>=threshold]
+        ask_walls=[x for x in asks if x[1]>=threshold]
+        support=max((p for p,q in bid_walls),default=max((p for p,q in bids),default=mid))
+        resistance=min((p for p,q in ask_walls),default=min((p for p,q in asks),default=mid))
+        phase=analyze_three_phase(closes,highs,lows,vols,closes[-1] if closes else mid,support,resistance)
+        return phase,support,resistance
+    except Exception:
+        return None,0.0,0.0
+
 async def radar_core(force=False):
     if not force and legacy.S.get('last_radar') and time.time()-legacy.S['last_radar']<5: return
     try:
@@ -155,7 +180,16 @@ async def radar_core(force=False):
                         and ind['ma20_5m']>=ind['mma20_5m'] and ind['ma20_15m']>=ind['mma20_15m']
                         and one>0 and two>0 and three>0 and vr>=1.0 and risk<=2.0
                         and scalp_move>=MIN_SCALP_MOVE_PCT)
+            phase,book_support,book_resistance=await _three_phase_market_data(s)
+            phase_gate=phase.gate if phase else "WAIT"
+            phase_action=phase.action if phase else "WAIT"
+            # Three-phase gate is authoritative for automatic entries.
+            if phase and phase.gate in ("BLOCK","WAIT_CONFIRMATION"):
+                usable=False
             score=float(t.get('score',0) or 0)+cfs*5.0+max(0.0,vr-1.0)*8.0+max(0.0,buy-.5)*20.0
+            if phase and phase.gate=="BLOCK": score-=25.0
+            elif phase and phase.gate=="WAIT_CONFIRMATION": score-=12.0
+            elif phase and phase.action in ("BUY_RECOVERY","SUPPORT_REACTION"): score+=10.0
             row_extra_move=scalp_move
             row=dict(t)
             row.update({'entry_allowed':usable,'entry_score':round(score,2),'entry_confirmations':cfs,
@@ -168,7 +202,10 @@ async def radar_core(force=False):
                         'ma20_1m':round(ind['ma20_1m'],10),'ma20_3m':round(ind['ma20_3m'],10),'ma20_5m':round(ind['ma20_5m'],10),'ma20_15m':round(ind['ma20_15m'],10),
                         'mma20_1m':round(ind['mma20_1m'],10),'mma20_3m':round(ind['mma20_3m'],10),'mma20_5m':round(ind['mma20_5m'],10),'mma20_15m':round(ind['mma20_15m'],10),
                         'indicator_tf':'1m/3m/5m/15m',
-                        'candidate_pool':'TOP-20','signal':'BUY' if usable else 'WATCH'})
+                        'candidate_pool':'TOP-20','signal':'BUY' if usable else 'WATCH',
+                        'phase':phase.phase if phase else 'UNKNOWN','phase_gate':phase_gate,'phase_action':phase_action,
+                        'phase_rsi':round(phase.rsi,2) if phase else 50.0,'phase_stoch_k':round(phase.stoch_k,2) if phase else 50.0,
+                        'phase_stoch_d':round(phase.stoch_d,2) if phase else 50.0,'book_support':round(book_support,10),'book_resistance':round(book_resistance,10)})
             ranked.append(row)
         ranked.sort(key=lambda z:(1 if z.get('entry_allowed') else 0,float(z.get('entry_score',0)),float(z.get('score',0))),reverse=True)
         legacy.S['ranking']=ranked[:ROTATION_POOL];legacy.S['last_radar']=time.time()
