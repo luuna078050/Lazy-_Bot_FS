@@ -363,7 +363,15 @@ async def open_core(i,symbol):
     # AUTO TOP-10, but it must never veto an already occupied slot.
     # The user can therefore fill slots from TOP-20 (or manually), press BOT ON,
     # and the occupied slots are sent to the selected execution mode.
-    await _original_open(i,s)
+    if legacy.S.get('auto_top', True):
+        q=next((x for x in legacy.S.get('ranking',[]) if str(x.get('symbol','')).upper().replace('/','')==s),None)
+        phase_gate_execution=(q or {}).get('phase_gate')
+        if q and q.get('entry_allowed') and phase_gate_execution in ("ALLOW","ALLOW_EARLY"):
+            await _original_open(i,s)
+        else:
+            return
+    else:
+        await _original_open(i,s)
     # Store the economic minimum target on the position so it remains stable
     # even if the session input is changed later.
     for p in reversed(legacy.S.get('positions',[])):
