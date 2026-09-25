@@ -5,6 +5,7 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
+from .three_phase import analyze_three_phase
 
 app = FastAPI(title="Fast Scalper")
 
@@ -27,6 +28,9 @@ START_ACCOUNT = 150.0
 START_BOT = 100.0
 RADAR_INTERVAL = 60
 ROTATE_SECONDS = 20
+
+BOOK_CACHE = {}
+BOOK_REFRESH = 180
 
 S = {
     "running": False, "account": START_ACCOUNT, "bot": START_BOT,
@@ -64,15 +68,58 @@ def ema(a, n):
 
 async def analyse(sym, tf):
     async with SEM:
-        rows = await get_json("/api/v3/klines", {"symbol":sym,"interval":tf,"limit":40})
+        rows = await get_json("/api/v3/klines", {"symbol":sym,"interval":tf,"limit":120})
     closes = [float(x[4]) for x in rows]
-    if len(closes) < 21: raise RuntimeError("not enough candles")
-    e9, e20 = ema(closes,9), ema(closes,20)
+    highs = [float(x[2]) for x in rows]
+    lows = [float(x[3]) for x in rows]
+    volumes = [float(x[5]) for x in rows]
+    if len(closes) < 30: raise RuntimeError("not enough candles")
+    ma7=sum(closes[-7:])/7
+    ma25=sum(closes[-25:])/25
+    ma99=sum(closes[-99:])/99 if len(closes)>=99 else sum(closes)/len(closes)
     mom = (closes[-1]/closes[-6]-1)*100
-    trend = (e9/e20-1)*100
-    score = max(0,min(100,50+trend*18+mom*7))
-    signal = "BUY" if e9>e20 and mom>0 else ("SELL" if e9<e20 and mom<0 else "WAIT")
-    return {"price":closes[-1],"momentum":mom,"trend":trend,"score":score,"signal":signal}
+    trend = (ma7/ma25-1)*100
+    return {"price":closes[-1],"momentum":mom,"trend":trend,
+            "ma7":ma7,"ma25":ma25,"ma99":ma99,
+            "closes":closes,"highs":highs,"lows":lows,"volumes":volumes}
+
+async def orderbook_zones(sym, force=False):
+    now_ts=time.time()
+    old=BOOK_CACHE.get(sym)
+    if old and not force and now_ts-old["ts"] < BOOK_REFRESH:
+        return old
+    try:
+        async with SEM:
+            book=await get_json("/api/v3/depth", {"symbol":sym,"limit":1000})
+        asks=[(float(p),float(q)) for p,q in book.get("asks",[]) if float(p)>0 and float(q)>0]
+        bids=[(float(p),float(q)) for p,q in book.get("bids",[]) if float(p)>0 and float(q)>0]
+        mid=(asks[0][0]+bids[0][0])/2 if asks and bids else 0
+        lo,hi=mid*0.80,mid*1.20
+        bids=[x for x in bids if lo<=x[0]<=mid]
+        asks=[x for x in asks if mid<=x[0]<=hi]
+        allq=[q for _,q in bids+asks]
+        med=sorted(allq)[len(allq)//2] if allq else 0
+        threshold=max(med*3.0, (sum(allq)/len(allq))*2.0 if allq else 0)
+        bid_walls=sorted([(p,q) for p,q in bids if q>=threshold], key=lambda x:x[1], reverse=True)[:12]
+        ask_walls=sorted([(p,q) for p,q in asks if q>=threshold], key=lambda x:x[1], reverse=True)[:12]
+        support=max((p for p,q in bid_walls), default=max((p for p,q in bids),default=mid))
+        resistance=min((p for p,q in ask_walls), default=min((p for p,q in asks),default=mid))
+        strongest_bid=max(bid_walls,key=lambda x:x[1]) if bid_walls else (support,0)
+        strongest_ask=max(ask_walls,key=lambda x:x[1]) if ask_walls else (resistance,0)
+        prev=old or {}
+        moved_support=((support/prev["support"]-1)*100) if prev.get("support") else 0
+        moved_resistance=((resistance/prev["resistance"]-1)*100) if prev.get("resistance") else 0
+        out={"ts":now_ts,"mid":mid,"range_low":lo,"range_high":hi,
+             "support":support,"resistance":resistance,
+             "strongest_bid":strongest_bid,"strongest_ask":strongest_ask,
+             "support_move_pct":moved_support,"resistance_move_pct":moved_resistance,
+             "bid_walls":bid_walls,"ask_walls":ask_walls}
+        BOOK_CACHE[sym]=out
+        return out
+    except Exception:
+        return old or {"ts":now_ts,"mid":0,"range_low":0,"range_high":0,
+                       "support":0,"resistance":0,"strongest_bid":(0,0),"strongest_ask":(0,0),
+                       "support_move_pct":0,"resistance_move_pct":0,"bid_walls":[],"ask_walls":[]}
 
 async def build_ranking():
     tickers = await get_json("/api/v3/ticker/24hr")
@@ -91,12 +138,28 @@ async def build_ranking():
         results = await asyncio.gather(*(analyse(s,tf) for tf in TFS), return_exceptions=True)
         good = [x for x in results if isinstance(x,dict)]
         if not good: return None
-        score = sum(x["score"] for x in good)/len(good)
-        momentum = sum(x["momentum"] for x in good)/len(good)
-        signal = "BUY" if score>=55 and momentum>0 else ("SELL" if score<=45 and momentum<0 else "WAIT")
-        return {"symbol":s,"price":float(t.get("lastPrice") or good[-1]["price"]),
+        base=next((x for x in good if x.get("price")),good[-1])
+        book=await orderbook_zones(s)
+        phase=analyze_three_phase(base["closes"],base["highs"],base["lows"],base["volumes"],
+                                  base["price"],book.get("support"),book.get("resistance"))
+        trend_score=max(0,min(100,50+base["trend"]*18+base["momentum"]*7))
+        score=trend_score
+        if phase.gate=="BLOCK": score-=25
+        elif phase.gate=="WAIT_CONFIRMATION": score-=12
+        elif phase.action in ("BUY_RECOVERY","SUPPORT_REACTION"): score+=10
+        signal="BUY" if score>=58 and phase.gate in ("ALLOW","ALLOW_EARLY") else "WAIT"
+        if phase.action=="NO_CHASE" or phase.gate=="BLOCK": signal="WAIT"
+        return {"symbol":s,"price":float(t.get("lastPrice") or base["price"]),
                 "change":float(t.get("priceChangePercent") or 0),"volume":float(t.get("quoteVolume") or 0),
-                "score":round(score,2),"signal":signal,"tf":TRADING_TF}
+                "score":round(max(0,min(100,score)),2),"signal":signal,"tf":TRADING_TF,
+                "ma7":round(base["ma7"],10),"ma25":round(base["ma25"],10),"ma99":round(base["ma99"],10),
+                "rsi":round(phase.rsi,2),"stoch_k":round(phase.stoch_k,2),"stoch_d":round(phase.stoch_d,2),
+                "phase":phase.phase,"phase_gate":phase.gate,"phase_action":phase.action,
+                "overheating":phase.overheating,"correction_depth_pct":phase.correction_depth_pct,
+                "support":book.get("support",0),"resistance":book.get("resistance",0),
+                "support_move_pct":book.get("support_move_pct",0),"resistance_move_pct":book.get("resistance_move_pct",0),
+                "book_range_low":book.get("range_low",0),"book_range_high":book.get("range_high",0),
+                "strongest_bid":book.get("strongest_bid"),"strongest_ask":book.get("strongest_ask")}
 
     rows = await asyncio.gather(*(one(s) for s in candidates))
     rows = [x for x in rows if x]
@@ -110,7 +173,7 @@ async def build_ranking():
         except Exception: p=c=v=0
         if p>0:
             rows.append({"symbol":s,"price":p,"change":c,"volume":v,
-                         "score":round(max(0,min(100,50+c*2)),2),"signal":"WAIT","tf":TRADING_TF})
+                         "score":round(max(0,min(100,50+c*2)),2),"signal":"WAIT","tf":TRADING_TF,"phase":"UNKNOWN","phase_gate":"WAIT","phase_action":"WAIT"})
             seen.add(s)
     return rows[:15]
 
