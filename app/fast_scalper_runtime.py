@@ -26,7 +26,7 @@ class AutoBody(BaseModel): enabled:bool
 class AddBody(BaseModel): symbol:str
 
 for r in list(legacy.app.router.routes):
-    if getattr(r,'path',None) in {'/','/api/state','/api/slots','/api/auto-top','/api/add-to-slot','/api/position/close','/api/withdraw','/api/mode','/api/test-binance'}:
+    if getattr(r,'path',None) in {'/','/api/state','/api/slots','/api/auto-top','/api/add-to-slot','/api/position/close','/api/withdraw','/api/allocation','/api/mode','/api/test-binance'}:
         legacy.app.router.routes.remove(r)
 
 def normalize_symbol(s):
