@@ -306,6 +306,10 @@ async def open_core(i,symbol):
     if i>=TRADE_SLOTS or not symbol or len(legacy.S.get('positions',[]))>=TRADE_SLOTS: return
     s=str(symbol).upper().replace('/','')
     if any(str(p.get('symbol','')).upper().replace('/','')==s for p in legacy.S.get('positions',[])): return
+    # Do not immediately re-enter a pair that just hit MAX_HOLD/loss/manual close.
+    # This applies to manual slots too; otherwise a stale slot can churn the
+    # same pair every 60 seconds (observed with SAGAUSDT).
+    if float(legacy.S.setdefault('pair_cooldown',{}).get(s,0) or 0)>time.time(): return
     # HARD RULE: an occupied execution slot is an order instruction in BOTH
     # PAPER and BINANCE_TEST. Radar ranking/entry confirmation is used to build
     # AUTO TOP-10, but it must never veto an already occupied slot.
