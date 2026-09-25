@@ -255,12 +255,16 @@ async def manage_core():
             # 0.25 percentage-point buffer: that made normal 0.33% targets
             # effectively unreachable on small slots.
             configured=float(p.get('target_pct') or legacy.S.get('profit') or DEFAULT_PROFIT)
-            target=configured
+            # The configured TP is the floor, not a guarantee that the trade
+            # is economically worthwhile. For small 20 USDT slots, 0.33%
+            # gross is only 0.066 USDT; after the modeled 0.30% round trip
+            # cost that leaves ~0.006 USDT. Require the configured floor AND
+            # enough movement to cover modeled costs plus MIN_NET_PROFIT_USDT.
+            economic_target=_required_target_pct(stake)
+            target=max(configured,economic_target)
             modeled_net=stake*(live/100.0-MODEL_ROUNDTRIP_COST_PCT/100.0)
 
-            # Baseline PROFIT_TARGET, protected: it may only close when the
-            # expected net remains positive after modeled costs.
-            if target>0 and live>=target:
+            if target>0 and live>=target and modeled_net>=MIN_NET_PROFIT_USDT:
                 await legacy.close(p,'PROFIT_TARGET')
                 continue
 
@@ -327,9 +331,8 @@ async def open_core(i,symbol):
     # even if the session input is changed later.
     for p in reversed(legacy.S.get('positions',[])):
         if str(p.get('symbol','')).upper().replace('/','')==s and int(p.get('slot',-1))==i:
-            # Respect the user's configured TP (e.g. 0.33%) exactly.
-            # Economic accounting is handled on the realized fill, not by
-            # silently raising the target for small positions.
+            # Keep the user's setting as the floor; manage_core applies the
+            # economic minimum required for this stake.
             p['target_pct']=float(legacy.S.get('profit') or DEFAULT_PROFIT)
             break
 legacy.open_pos=open_core
