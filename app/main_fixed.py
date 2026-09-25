@@ -231,7 +231,11 @@ async def engine():
                 for i,cfg in enumerate(S["slots"]):
                     if not cfg and i<len(top):
                         cfg={"symbol":top[i],"tf":TRADING_TF,"auto":True}; S["slots"][i]=cfg
-                    if cfg and not any(p["slot"]==i for p in S["positions"]): await open_position(i,cfg["symbol"])
+                    if cfg and not any(p["slot"]==i for p in S["positions"]):
+                        q=next((x for x in S["ranking"] if x["symbol"]==cfg["symbol"]),None)
+                        # Hard gate: ranking alone never opens a trade during correction/overheating.
+                        if q and q.get("signal")=="BUY" and q.get("phase_gate") in ("ALLOW","ALLOW_EARLY"):
+                            await open_position(i,cfg["symbol"])
             await asyncio.sleep(2)
         except Exception as e:
             S["error"]=f"Engine: {type(e).__name__}: {e}"; await asyncio.sleep(3)
