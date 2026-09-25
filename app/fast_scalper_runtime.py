@@ -80,9 +80,9 @@ const $=id=>document.getElementById(id),num=x=>Number(x||0).toFixed(4),age=s=>{s
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 async function refresh(){try{const s=await api('/api/state');$('account').textContent=num(s.account);$('bot').textContent=num(s.bot_balance);$('reserve').textContent=num(s.reserve);$('pnl').textContent=num(s.session_realized);$('pnl').classList.remove('pplus','pminus');$('pnl').classList.add(Number(s.session_realized||0)>=0?'pplus':'pminus');$('profit').value=Number(s.profit_pct??.33).toFixed(2);$('reinvest').checked=!!s.reinvest;$('autoTop').checked=!!s.auto_top;$('note').textContent=s.auto_top?'AUTO TOP-10 active':'MANUAL TOP-10 active';$('session').textContent='SESSION '+age(s.session_age)+' · 24H '+age(s.day_age);$('badge').textContent=s.running?'BOT ON · ACTIVE':'BOT OFF · TRADING STOPPED';ranking=s.ranking||[];renderPositions(s.positions||[]);renderClosed(s.closed||[]);renderLastFive(s.closed||[]);renderSlots(s.slots||[]);if(radarOpen)renderRadar();if(s.error)msg(s.error)}catch(e){msg(e.message)}}
 function renderPositions(a){$('positions').innerHTML=a.length?a.map(p=>{const d=Number(p.delta_usdt||0);return '<div class="tradeitem posrow"><b>'+esc(p.symbol)+'</b> · '+num(p.stake)+' USDT · <span class="'+(d>=0?'pplus':'pminus')+'">PnL '+(d>=0?'+':'')+num(d)+' USDT</span> · '+age(p.age_seconds)+' <button type="button" class="btn red closepos" data-close-id="'+esc(p.id||'')+'" data-close-symbol="'+esc(p.symbol||'')+'">CLOSE</button></div>'}).join(''):'<div class="empty">No open positions</div>'}
-function renderClosed(a){const total=a.reduce((v,x)=>v+Number(x.pnl||0),0);const cls=total>=0?'pplus':'pminus';$('closedCount').textContent=String(a.length);$('closedSummary').innerHTML=a.length?'Closed: '+a.length+' · <span class="'+cls+'">PnL: '+(total>=0?'+':'')+num(total)+' USDT</span>':'No closed trades'}
+function renderClosed(a){const total=a.reduce((v,x)=>v+Number(x.pnl||0),0);const cls=total>=0?'pplus':'pminus';$('closedCount').textContent=String(a.length);$('closedSummary').className='summary '+(a.length?cls:'');$('closedSummary').innerHTML=a.length?'Closed: '+a.length+' · PnL: '+(total>=0?'+':'')+num(total)+' USDT':'No closed trades'}
 function renderLastFive(a){$('lastFive').innerHTML=a.length?a.slice(0,5).map((p,i)=>'<div class="tradeitem"><b>'+String(i+1).padStart(2,'0')+' · '+esc(p.symbol)+'</b> · '+num(p.stake)+' USDT · PnL '+num(p.pnl)+' USDT · '+esc(p.reason||'CLOSED')+'</div>').join(''):'<div class="empty">No closed trades</div>'}
-function renderSlots(a){const selected=$('autoTop').checked?ranking.slice(0,10).map(x=>x.symbol):(a||[]).slice(0,10);const el=$('slots');el.innerHTML='';for(let i=0;i<10;i++){const box=document.createElement('div');box.className='slotbox';const n=document.createElement('span');n.className='slotnum';n.textContent=String(i+1).padStart(2,'0');const x=document.createElement('input');x.className='slot';x.placeholder='USDT pair';x.value=selected[i]||'';x.disabled=$('autoTop').checked;x.addEventListener('change',saveManualSlots);box.append(n,x);el.appendChild(box)}}
+function renderSlots(a){const selected=$('autoTop').checked?(a||[]).slice(0,10):(a||[]).slice(0,10);const el=$('slots');el.innerHTML='';for(let i=0;i<10;i++){const box=document.createElement('div');box.className='slotbox';const n=document.createElement('span');n.className='slotnum';n.textContent=String(i+1).padStart(2,'0');const x=document.createElement('input');x.className='slot';x.placeholder='USDT pair';x.value=selected[i]||'';x.disabled=$('autoTop').checked;x.addEventListener('change',saveManualSlots);box.append(n,x);el.appendChild(box)}}
 function renderRadar(){let h='<div class="rowline muted"><span>#</span><span>PAIR</span><span>SIGNAL</span><span>24H</span><span>SCORE</span><span>ACTION</span></div>';ranking.slice(0,20).forEach((x,i)=>h+='<div class="rowline"><span>'+String(i+1).padStart(2,'0')+'</span><span class="pair">'+esc(x.symbol)+'</span><span>'+esc(x.signal||'WAIT')+'</span><span>'+Number(x.change??x.change_24h_pct??0).toFixed(2)+'%</span><span>'+Number(x.score??x.entry_score??0).toFixed(1)+'</span><button class="addbtn" onclick="addToSlot(\''+esc(x.symbol)+'\')">ADD TO SLOT</button></div>');$('pool').innerHTML=ranking.length?h:'<div class="empty">Waiting for radar data…</div>'}
 function toggleRadar(){radarOpen=!radarOpen;$('radarBody').style.display=radarOpen?'block':'none';$('radarBtn').textContent=radarOpen?'COLLAPSE':'EXPAND';if(radarOpen)renderRadar()}
 async function toggleAuto(){try{await api('/api/auto-top',{method:'POST',body:JSON.stringify({enabled:$('autoTop').checked})});msg($('autoTop').checked?'AUTO TOP-10 enabled':'Manual TOP-10 enabled');await refresh()}catch(e){msg(e.message);await refresh()}}
@@ -171,7 +171,46 @@ async def withdraw(b:WithdrawBody):
     if amount<=0: raise HTTPException(400,'Withdrawal amount must be greater than 0')
     free=float(legacy.S.get('free',0))
     if amount>free+1e-9: raise HTTPException(400,f'Withdrawal {amount:.4f} exceeds free bot balance {free:.4f}')
-    legacy.S['free']=free-amount;legacy.S['bot']=max(0,float(legacy.S.get('bot',0))-amount);legacy.refresh_reserve();return state_payload()
+    # Withdrawal leaves the trading allocation and leaves the account.
+    # Keep the accounting invariant: Account = Reserve + Bot.
+    legacy.S['free']=free-amount
+    legacy.S['bot']=max(0.0,float(legacy.S.get('bot',0))-amount)
+    legacy.S['account']=max(0.0,float(legacy.S.get('account',0))-amount)
+    legacy.refresh_reserve()
+    return state_payload()
+
+@legacy.app.post('/api/allocation')
+async def allocation_core(b:dict):
+    if legacy.S.get('running'): raise HTTPException(400,'STOP the bot before changing Bot Allocation')
+    amount=float(b.get('amount') or 0)
+    if amount<0: raise HTTPException(400,'Bot allocation cannot be negative')
+    if legacy.S.get('mode')=='PAPER':
+        if amount>float(legacy.S.get('account',0) or 0)+1e-9:
+            raise HTTPException(400,f'Allocation {amount:.4f} exceeds PAPER account {float(legacy.S.get("account",0) or 0):.4f}')
+        if amount<legacy.invested()-1e-9:
+            raise HTTPException(400,f'Allocation cannot be below open capital {legacy.invested():.4f}')
+        # Internal transfer only: total Account Balance does not change.
+        legacy.S['bot']=amount
+        legacy.S['free']=max(0.0,amount-legacy.invested())
+        legacy.refresh_reserve()
+        return state_payload()
+    if legacy.S.get('mode')!='BINANCE_TEST':
+        raise HTTPException(403,'Unsupported mode')
+    try:
+        await legacy.B.ping()
+        acc=await legacy.B.account()
+        account_usdt=next((float(x.get('free') or 0) for x in acc.get('balances',[]) if x.get('asset')=='USDT'),0.0)
+        if amount>account_usdt+1e-9: raise HTTPException(400,f'Allocation {amount:.4f} exceeds free USDT {account_usdt:.4f}')
+        if amount<legacy.invested()-1e-9: raise HTTPException(400,f'Allocation cannot be below open capital {legacy.invested():.4f}')
+        legacy.S['account']=account_usdt+legacy.invested()
+        legacy.S['bot']=amount
+        legacy.S['free']=max(0.0,amount-legacy.invested())
+        legacy.refresh_reserve()
+        return state_payload()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400,f'Bot Allocation failed: {type(e).__name__}: {e}')
 
 class SettingsBody(BaseModel):
     reinvest: bool
