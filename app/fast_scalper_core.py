@@ -107,26 +107,35 @@ def _scalp_move_pct(symbol, t):
         except (TypeError,ValueError): pass
     return max(vals+[0.0]+ranges)
 
-async def _three_phase_market_data(symbol):
-    """Fetch enough OHLCV/order-book context for the three-phase entry gate."""
+async def _three_phase_market_data(symbol, client=None):
+    """Use the already-streamed 1m candles and fetch only the live order book."""
     try:
-        async with httpx.AsyncClient(timeout=2.5) as client:
-            kl=await client.get(f"{legacy.B.base}/v3/klines",params={"symbol":symbol,"interval":"1m","limit":120})
-            kl.raise_for_status(); rows=kl.json()
-            book=await client.get(f"{legacy.B.base}/v3/depth",params={"symbol":symbol,"limit":100})
+        with RADAR.lock:
+            bars=list(RADAR.bars.get(str(symbol).upper().replace('/',''),()))
+        if len(bars)<30:
+            return None,0.0,0.0
+        bars=bars[-120:]
+        closes=[float(x.get('close') or 0) for x in bars]
+        highs=[float(x.get('high') or 0) for x in bars]
+        lows=[float(x.get('low') or 0) for x in bars]
+        vols=[float(x.get('volume') or 0) for x in bars]
+        http=client or httpx.AsyncClient(timeout=2.0)
+        own=client is None
+        try:
+            book=await http.get(f"{legacy.B.base}/v3/depth",params={"symbol":symbol,"limit":100})
             book.raise_for_status(); b=book.json()
-        closes=[float(x[4]) for x in rows]; highs=[float(x[2]) for x in rows]
-        lows=[float(x[3]) for x in rows]; vols=[float(x[5]) for x in rows]
+        finally:
+            if own: await http.aclose()
         bids=[(float(p),float(q)) for p,q in b.get("bids",[]) if float(p)>0 and float(q)>0]
         asks=[(float(p),float(q)) for p,q in b.get("asks",[]) if float(p)>0 and float(q)>0]
-        mid=(bids[0][0]+asks[0][0])/2 if bids and asks else (closes[-1] if closes else 0)
+        mid=(bids[0][0]+asks[0][0])/2 if bids and asks else closes[-1]
         qs=[q for _,q in bids+asks]; med=sorted(qs)[len(qs)//2] if qs else 0
         threshold=max(med*3,(sum(qs)/len(qs))*2 if qs else 0)
         bid_walls=[x for x in bids if x[1]>=threshold]
         ask_walls=[x for x in asks if x[1]>=threshold]
         support=max((p for p,q in bid_walls),default=max((p for p,q in bids),default=mid))
         resistance=min((p for p,q in ask_walls),default=min((p for p,q in asks),default=mid))
-        phase=analyze_three_phase(closes,highs,lows,vols,closes[-1] if closes else mid,support,resistance)
+        phase=analyze_three_phase(closes,highs,lows,vols,closes[-1],support,resistance)
         return phase,support,resistance
     except Exception:
         return None,0.0,0.0
@@ -414,6 +423,15 @@ async def close_net_core(p,reason):
     sym=str(p.get('symbol','')).upper().replace('/','')
     if sym and (net_pnl<0 or reason in {'TIMEOUT','MAX_HOLD'}):
         legacy.S.setdefault('pair_cooldown',{})[sym]=time.time()+180.0
+    try:
+        si=int(p.get('slot'))
+        slots=list(legacy.S.get('slots',[]))
+        while len(slots)<ROTATION_POOL: slots.append(None)
+        if 0 <= si < len(slots):
+            slots[si]=None
+            legacy.S['slots']=slots[:ROTATION_POOL]
+    except (TypeError,ValueError):
+        pass
     print(f"TRADE_CLOSE symbol={sym} reason={reason} pnl={net_pnl:.6f} age={int(p.get('age_seconds',0) or 0)}",flush=True)
     if p in legacy.S.get('positions',[]): legacy.S['positions'].remove(p)
     return closed
