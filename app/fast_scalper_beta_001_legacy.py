@@ -201,10 +201,27 @@ async def start(b:Start):
 async def stop():S['running']=False;return await state()
 @app.post('/api/paper/emergency')
 async def emergency():
- for p in list(S['positions']):
-  try:await close(p,'EMERGENCY_STOP')
-  except Exception as e:S['error']=f'Close {p["symbol"]}: {type(e).__name__}: {e}'
- S['running']=False;S['session_started']=None;return await state()
+ # Stop new entries BEFORE the first awaited sell. The old order closed
+ # positions first and only then stopped the engine, so an in-flight entry
+ # could open another position while EMERGENCY was already closing others.
+ S['running']=False
+ S['stop_requested']=True
+ S['error']=None
+ # A second pass catches an order that was already in-flight when the
+ # emergency request arrived. Never report a successful emergency while
+ # positions remain open.
+ for _ in range(3):
+  pending=list(S.get('positions',[]))
+  if not pending: break
+  for p in pending:
+   try:
+    await close(p,'EMERGENCY_STOP')
+   except Exception as e:
+    S['error']=f'Close {p["symbol"]}: {type(e).__name__}: {e}'
+  if S.get('positions'):
+   await asyncio.sleep(0.25)
+ S['session_started']=None
+ return await state()
 @app.post('/api/reset')
 async def reset():
  if S['running']:raise HTTPException(400,'STOP the bot before RESET')
